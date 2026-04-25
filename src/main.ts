@@ -65,6 +65,8 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
       // Brief double-take whenever a fresh card lands. Goal-driven states
       // (seek/carry/deliver) ignore this, so we never disturb a delivery.
       onSpawn: () => dino.react("surprised", 500),
+      onRadioChange: () => dino.react("curious", 900),
+      onBacklogPressure: () => dino.react("sad", 900),
     }
   );
 

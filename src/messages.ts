@@ -85,6 +85,10 @@ export interface MessageWorldOptions {
    * dedup rejections, capacity rejections, or unknown kinds.
    */
   onSpawn?: (item: ContentItem) => void;
+  /** Called when the user changes radio channel/pace. */
+  onRadioChange?: (prefs: RadioPreferences) => void;
+  /** Called sparingly when the local radio queue starts backing up. */
+  onBacklogPressure?: (pendingCount: number) => void;
 }
 
 /**
@@ -124,12 +128,17 @@ export class MessageWorld {
   private nextRefreshAt = 0;
   private nextSpawnAt = 0;
   private readonly onSpawn?: (item: ContentItem) => void;
+  private readonly onRadioChange?: (prefs: RadioPreferences) => void;
+  private readonly onBacklogPressure?: (pendingCount: number) => void;
   private archiveWarningShown = false;
   private realtime: WebSocket | null = null;
   private realtimeConnected = false;
   private clientId: string | null = null;
   private readonly pendingItems = new Map<string, ContentItem>();
   private radioPrefs = loadRadioPreferences();
+  private radioStatusEl: HTMLSpanElement | null = null;
+  private readonly radioAudio = new RadioAudio();
+  private lastBacklogWarningAt = 0;
 
   constructor(
     parent: HTMLElement,
@@ -140,6 +149,8 @@ export class MessageWorld {
   ) {
     this.stage = parent;
     this.onSpawn = opts.onSpawn;
+    this.onRadioChange = opts.onRadioChange;
+    this.onBacklogPressure = opts.onBacklogPressure;
     this.worldW = worldW;
     this.worldH = worldH;
     this.maxConcurrent = opts.maxConcurrent ?? 3;
@@ -332,6 +343,7 @@ export class MessageWorld {
     this.applyTransform(msg);
 
     this.onSpawn?.(item);
+    this.radioAudio.item(item.kind);
     return msg;
   }
 
@@ -569,9 +581,13 @@ export class MessageWorld {
           <option value="busy">busy</option>
         </select>
       </label>
+      <button type="button" class="radio-sound" aria-pressed="false">sound off</button>
+      <span class="radio-status" aria-live="polite">tuned</span>
     `;
     const channel = controls.querySelector<HTMLSelectElement>(".radio-channel")!;
     const pace = controls.querySelector<HTMLSelectElement>(".radio-pace")!;
+    const sound = controls.querySelector<HTMLButtonElement>(".radio-sound")!;
+    this.radioStatusEl = controls.querySelector<HTMLSpanElement>(".radio-status");
     channel.value = this.radioPrefs.channel;
     pace.value = this.radioPrefs.pace;
     const update = () => {
@@ -582,6 +598,12 @@ export class MessageWorld {
     };
     channel.addEventListener("change", update);
     pace.addEventListener("change", update);
+    sound.addEventListener("click", async () => {
+      const enabled = await this.radioAudio.toggle(this.radioPrefs.channel);
+      sound.textContent = enabled ? "sound on" : "sound off";
+      sound.setAttribute("aria-pressed", String(enabled));
+      this.setRadioStatus(enabled ? "broadcasting" : "muted");
+    });
     this.stage.appendChild(controls);
   }
 
@@ -599,8 +621,15 @@ export class MessageWorld {
         this.cullActiveItem(msg.id);
       }
     }
-    this.nextSpawnAt = performance.now() + spawnGapForPace(next.pace);
+    this.nextSpawnAt = performance.now() + spawnGapForPace(next.pace, this.pendingItems.size);
+    this.radioAudio.tune(next.channel);
+    this.setRadioStatus(`tuning ${radioChannelLabel(next.channel)}`);
+    this.onRadioChange?.(next);
     this.sendRealtime({ type: "set_preferences", preferences: this.realtimePreferences() });
+  }
+
+  private setRadioStatus(text: string): void {
+    if (this.radioStatusEl) this.radioStatusEl.textContent = text;
   }
 
   /**
@@ -743,6 +772,7 @@ export class MessageWorld {
   }
 
   private drainPending(now: number): void {
+    this.updateBacklogStatus(now);
     if (now < this.nextSpawnAt) return;
     if (this.messages.size >= this.maxConcurrent) return;
     for (const [id, item] of this.pendingItems) {
@@ -753,9 +783,23 @@ export class MessageWorld {
       const spawned = this.spawn(item);
       if (spawned) {
         this.pendingItems.delete(id);
-        this.nextSpawnAt = now + spawnGapForPace(this.radioPrefs.pace);
+        this.nextSpawnAt = now + spawnGapForPace(this.radioPrefs.pace, this.pendingItems.size);
       }
       return;
+    }
+  }
+
+  private updateBacklogStatus(now: number): void {
+    const pending = this.pendingItems.size;
+    if (pending >= 6) {
+      this.setRadioStatus("too much static");
+      if (now - this.lastBacklogWarningAt > 8_000) {
+        this.lastBacklogWarningAt = now;
+        this.radioAudio.warn();
+        this.onBacklogPressure?.(pending);
+      }
+    } else if (pending >= 3) {
+      this.setRadioStatus("buffering");
     }
   }
 
@@ -1122,15 +1166,152 @@ function sanitizeRadioPace(value: unknown): RadioPace {
   return value === "chill" || value === "busy" || value === "normal" ? value : "normal";
 }
 
-function spawnGapForPace(pace: RadioPace): number {
+function spawnGapForPace(pace: RadioPace, backlog = 0): number {
+  const pressureMultiplier = backlog >= 6 ? 1.8 : backlog >= 3 ? 1.25 : 1;
   switch (pace) {
     case "chill":
-      return CARD_SPAWN_GAP_MS * 2;
+      return CARD_SPAWN_GAP_MS * 2 * pressureMultiplier;
     case "busy":
-      return Math.round(CARD_SPAWN_GAP_MS * 0.5);
+      return Math.round(CARD_SPAWN_GAP_MS * 0.5 * pressureMultiplier);
     case "normal":
-      return CARD_SPAWN_GAP_MS;
+      return CARD_SPAWN_GAP_MS * pressureMultiplier;
   }
+}
+
+function radioChannelLabel(channel: RadioChannel): string {
+  switch (channel) {
+    case "all":
+      return "all";
+    case "quake":
+      return "quakes";
+    case "fact":
+      return "facts";
+    case "thought":
+      return "thoughts";
+    case "history":
+    case "news":
+      return channel;
+  }
+}
+
+class RadioAudio {
+  private ctx: AudioContext | null = null;
+  private master: GainNode | null = null;
+  private hum: OscillatorNode | null = null;
+  private staticTimer: number | null = null;
+  private enabled = false;
+
+  async toggle(channel: RadioChannel): Promise<boolean> {
+    if (this.enabled) {
+      this.stop();
+      return false;
+    }
+    await this.start(channel);
+    return this.enabled;
+  }
+
+  tune(channel: RadioChannel): void {
+    if (!this.enabled || !this.ctx || !this.hum) return;
+    this.hum.frequency.setTargetAtTime(channelFrequency(channel), this.ctx.currentTime, 0.04);
+    this.staticBurst(0.16, 0.018);
+  }
+
+  item(kind: ContentKind): void {
+    if (!this.enabled || !this.ctx || !this.master) return;
+    const now = this.ctx.currentTime;
+    this.beep(kindFrequency(kind), now, 0.055);
+    this.beep(kindFrequency(kind) * 1.5, now + 0.08, 0.05);
+  }
+
+  warn(): void {
+    if (!this.enabled) return;
+    this.staticBurst(0.28, 0.035);
+  }
+
+  private async start(channel: RadioChannel): Promise<void> {
+    const AudioCtor =
+      window.AudioContext ??
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioCtor) return;
+    const ctx = new AudioCtor();
+    await ctx.resume();
+    const master = ctx.createGain();
+    master.gain.value = 0.025;
+    master.connect(ctx.destination);
+
+    const hum = ctx.createOscillator();
+    hum.type = "triangle";
+    hum.frequency.value = channelFrequency(channel);
+    hum.connect(master);
+    hum.start();
+
+    this.ctx = ctx;
+    this.master = master;
+    this.hum = hum;
+    this.enabled = true;
+    this.staticTimer = window.setInterval(() => this.staticBurst(0.08, 0.008), 3_500);
+    this.tune(channel);
+  }
+
+  private stop(): void {
+    if (this.staticTimer !== null) window.clearInterval(this.staticTimer);
+    this.staticTimer = null;
+    this.hum?.stop();
+    void this.ctx?.close();
+    this.ctx = null;
+    this.master = null;
+    this.hum = null;
+    this.enabled = false;
+  }
+
+  private beep(freq: number, startAt: number, duration: number): void {
+    if (!this.ctx || !this.master) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.0001, startAt);
+    gain.gain.exponentialRampToValueAtTime(0.045, startAt + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startAt + duration);
+    osc.connect(gain).connect(this.master);
+    osc.start(startAt);
+    osc.stop(startAt + duration + 0.02);
+  }
+
+  private staticBurst(duration: number, gainValue: number): void {
+    if (!this.ctx || !this.master) return;
+    const length = Math.max(1, Math.floor(this.ctx.sampleRate * duration));
+    const buffer = this.ctx.createBuffer(1, length, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < data.length; i += 1) data[i] = Math.random() * 2 - 1;
+    const source = this.ctx.createBufferSource();
+    const gain = this.ctx.createGain();
+    gain.gain.value = gainValue;
+    source.buffer = buffer;
+    source.connect(gain).connect(this.master);
+    source.start();
+  }
+}
+
+function channelFrequency(channel: RadioChannel): number {
+  switch (channel) {
+    case "news":
+      return 132;
+    case "quake":
+      return 98;
+    case "history":
+      return 116;
+    case "fact":
+      return 148;
+    case "thought":
+      return 174;
+    case "all":
+      return 122;
+  }
+}
+
+function kindFrequency(kind: ContentKind): number {
+  return channelFrequency(kind === "weather" ? "all" : kind);
 }
 
 let stylesInjected = false;
@@ -1220,6 +1401,7 @@ function injectStylesOnce(): void {
       left: 12px;
       top: 12px;
       display: flex;
+      flex-wrap: wrap;
       gap: 8px;
       align-items: center;
       padding: 6px 8px;
@@ -1245,6 +1427,24 @@ function injectStylesOnce(): void {
       font: inherit;
       letter-spacing: 0;
       text-transform: none;
+    }
+    .radio-sound {
+      background: transparent;
+      color: var(--ink, #e8e4d8);
+      border: 1px solid var(--ink-soft, #8a8678);
+      border-radius: 1px;
+      font: inherit;
+      letter-spacing: 0;
+      text-transform: none;
+      cursor: pointer;
+    }
+    .radio-sound[aria-pressed="true"] {
+      background: var(--ink, #e8e4d8);
+      color: var(--paper, #1f1e26);
+    }
+    .radio-status {
+      color: var(--ink-soft, #8a8678);
+      letter-spacing: 0.06em;
     }
 
     .bin-row {
