@@ -219,6 +219,53 @@ const SLEEP = [
   "....................",
 ];
 
+// surprise — head jolts up, two wide eyes, body slightly recoiled left so
+// the stance reads as "what was that?!" rather than the calmer LOOK_UP.
+const SURPRISE = [
+  "....................",
+  ".............XXXX...",
+  "............XWXWXX..",
+  "............XXXXXXX.",
+  "............XXXXX...",
+  "...........XXXX.....",
+  "..........XXX.......",
+  ".....XXXXXXXXX......",
+  "...XXXXXXXXXXX......",
+  "..XXXXXXXXXXX.......",
+  "...XXXXXXXX.........",
+  ".....XX.X.XX........",
+  ".....XX...XX........",
+  "....XXX...XXX.......",
+  "...XXX.....XX.......",
+  "...XX........XX.....",
+  "..XXXX.....XXXX.....",
+  "....................",
+];
+
+// cheer — a small post-delivery hop. Body and head shifted up one row, legs
+// pulled wide apart, and two transparent pixels in the snout suggest a
+// big open grin. The gap below his feet reads as "off the ground".
+const CHEER = [
+  "....................",
+  ".............XXXXX..",
+  "............XWXXWXX.",
+  "............XXXXXXX.",
+  "............XXXXX...",
+  "...........XXXX.....",
+  "......XXXXXXXXX.....",
+  "....XXXXXXXXXXX.....",
+  "...XXXXXXXXXXX......",
+  "....XXXXXXXX........",
+  "......XX.X.XX.......",
+  ".....XX.....XX......",
+  "....XX.......XX.....",
+  "...XXX........XX....",
+  "..XXX..........XXX..",
+  "....................",
+  "....................",
+  "....................",
+];
+
 export type FrameId =
   | "idle"
   | "walk_a"
@@ -228,7 +275,9 @@ export type FrameId =
   | "angry"
   | "sad"
   | "blink"
-  | "sleep";
+  | "sleep"
+  | "surprise"
+  | "cheer";
 
 const RAW_FRAMES: Record<FrameId, string[]> = {
   idle: IDLE,
@@ -240,6 +289,8 @@ const RAW_FRAMES: Record<FrameId, string[]> = {
   sad: SAD,
   blink: BLINK,
   sleep: SLEEP,
+  surprise: SURPRISE,
+  cheer: CHEER,
 };
 
 export const SPRITE_GRID_W = 20;

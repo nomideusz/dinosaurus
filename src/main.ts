@@ -6,9 +6,10 @@
 // floating cards; the dino walks over, picks one up, and drops it into the
 // matching bin.
 
-import { Dino } from "./dino.js";
+import { Dino, type Mood } from "./dino.js";
 import { MessageWorld, type FloatingMessage } from "./messages.js";
 import { Narrator } from "./narrator.js";
+import type { ContentKind } from "./services/content.js";
 import { DevToSource } from "./services/devto.js";
 import { FactsSource } from "./services/facts.js";
 import { HistorySource } from "./services/history.js";
@@ -80,7 +81,13 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
   // courier loop takes it from there.
   const narrator = new Narrator({
     cadenceMs: 9_000,
-    onItem: (item) => messages.spawn(item) !== null,
+    onItem: (item) => {
+      const spawned = messages.spawn(item) !== null;
+      // Brief double-take when something new floats in. Goal-driven states
+      // (seek/carry/deliver) ignore this, so we don't disturb a delivery.
+      if (spawned) dino.react("surprised", 500);
+      return spawned;
+    },
   });
   narrator.registerSource(new HackerNewsSource());
   narrator.registerSource(new DevToSource());
@@ -176,7 +183,7 @@ class Courier {
         this.messages.setCarried(msg.id, anchor.x, anchor.y);
         if (this.dino.hasArrived(14)) {
           this.messages.deliver(msg.id);
-          this.dino.startDeliver();
+          this.dino.startDeliver(420, deliveryMoodFor(msg.kind));
           this.phase = "delivering";
         }
         break;
@@ -227,7 +234,28 @@ class Courier {
     this.targetId = null;
     this.phase = "idle";
     this.dino.cancelGoal(now);
+    // The card slipped away (TTL'd out, was delivered by another visitor's
+    // dino, etc.) — flash an angry face so the lost trip reads as frustration.
+    this.dino.react("angry", 700);
     this.nextLookAt = now + 800;
+  }
+}
+
+/** The face the dino wears while dropping a card of this kind. */
+function deliveryMoodFor(kind: ContentKind): Mood {
+  switch (kind) {
+    case "news":
+      return "excited"; // a hop — fresh news pleases him
+    case "weather":
+      return "happy";
+    case "fact":
+      return "surprised"; // TIL!
+    case "thought":
+      return "happy";
+    case "quake":
+      return "angry"; // the earth shaking is alarming
+    case "history":
+      return "curious";
   }
 }
 

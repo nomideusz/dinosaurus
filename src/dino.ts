@@ -13,7 +13,15 @@ import {
   SPRITE_GRID_W,
 } from "./sprite.js";
 
-export type Mood = "angry" | "curious" | "happy" | "neutral" | "sad" | "sleepy";
+export type Mood =
+  | "angry"
+  | "curious"
+  | "excited"
+  | "happy"
+  | "neutral"
+  | "sad"
+  | "sleepy"
+  | "surprised";
 
 export type Activity =
   | "walk"
@@ -135,13 +143,25 @@ export class Dino {
     return Math.hypot(this.targetX - this.x, this.targetY - this.y) <= eps;
   }
 
-  /** Ask the dino to pause and look attentive (used before he speaks). */
-  react(mood: Mood = "curious"): void {
+  /**
+   * Ask the dino to pause and emote. Goal-driven activities (seek/carry/
+   * deliver) take priority — we don't interrupt him mid-task. Otherwise he
+   * stops where he is, shows the matching face for `durationMs`, then the
+   * normal decision loop resumes.
+   */
+  react(mood: Mood = "curious", durationMs = 2200): void {
+    if (
+      this.activity === "seek" ||
+      this.activity === "carry" ||
+      this.activity === "deliver"
+    ) {
+      return;
+    }
     this.mood = mood;
     this.activity = "react";
     this.targetX = this.x;
     this.targetY = this.y;
-    this.nextDecisionAt = performance.now() + 2200;
+    this.nextDecisionAt = performance.now() + durationMs;
   }
 
   /** Tell the dino he just finished saying something — relax. */
@@ -178,13 +198,17 @@ export class Dino {
     this.nextDecisionAt = Number.POSITIVE_INFINITY;
   }
 
-  /** Pause briefly to drop a message into a bin. */
-  startDeliver(durationMs = 420): void {
+  /**
+   * Pause briefly to drop a message into a bin. The optional `mood` colours
+   * the face during the deliver pose — e.g. "excited" picks the cheer frame
+   * for big news, "surprised" works well for quakes, "curious" for facts.
+   */
+  startDeliver(durationMs = 420, mood: Mood = "happy"): void {
     this.activity = "deliver";
     this.targetX = this.x;
     this.targetY = this.y;
     this.deliverUntil = performance.now() + durationMs;
-    this.mood = "happy";
+    this.mood = mood;
     this.nextDecisionAt = this.deliverUntil + 200;
   }
 
@@ -274,7 +298,7 @@ export class Dino {
     if (this.activity === "sleep") return this.frames.sleep;
     if (now < this.blinkUntil) return this.frames.blink;
     if (this.activity === "react") return this.moodFrame();
-    if (this.activity === "deliver") return this.frames.happy;
+    if (this.activity === "deliver") return this.moodFrame();
     if (this.activity === "look") return this.frames.look_up;
     if (
       this.activity === "walk" ||
@@ -294,10 +318,14 @@ export class Dino {
         return this.frames.angry;
       case "happy":
         return this.frames.happy;
+      case "excited":
+        return this.frames.cheer;
       case "sad":
         return this.frames.sad;
       case "curious":
         return this.frames.look_up;
+      case "surprised":
+        return this.frames.surprise;
       case "sleepy":
         return this.frames.sleep;
       case "neutral":
@@ -318,19 +346,29 @@ export class Dino {
 
     const r = Math.random();
     if (this.activity === "sleep" && r < 0.55) {
-      this.activity = "idle";
-      this.scheduleNextDecision(now + 1200 + Math.random() * 1500);
+      // Wake from a nap with a small stretch — show the "look up" pose
+      // briefly so the transition reads as yawning/stretching.
+      this.activity = "react";
+      this.mood = "curious";
+      this.scheduleNextDecision(now + 700 + Math.random() * 600);
       return;
     }
-    if (r < 0.65) {
+    // Small spontaneous emote — keeps him from feeling robotic during long
+    // stretches with no cards to chase.
+    if (r < 0.07) {
+      const emotes: Mood[] = ["happy", "sad", "surprised", "curious"];
+      this.react(emotes[Math.floor(Math.random() * emotes.length)], 1100 + Math.random() * 700);
+      return;
+    }
+    if (r < 0.6) {
       this.activity = "walk";
       this.pickWanderTarget();
       this.speed = 26 + Math.random() * 28;
       this.scheduleNextDecision(now + 12_000);
-    } else if (r < 0.85) {
+    } else if (r < 0.82) {
       this.activity = "idle";
       this.scheduleNextDecision(now + 1200 + Math.random() * 2400);
-    } else if (r < 0.95) {
+    } else if (r < 0.94) {
       this.activity = "look";
       this.scheduleNextDecision(now + 900 + Math.random() * 1100);
     } else {
