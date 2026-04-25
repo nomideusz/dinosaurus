@@ -51,9 +51,16 @@ function snapshot() {
   return { bins: out, ttlMs: ARCHIVE_TTL_MS };
 }
 
-function broadcast(snap = snapshot()) {
+/**
+ * Push a typed event to every SSE subscriber. Events are deltas — a single
+ * added item or a list of expired ids — so the per-client egress on a busy
+ * archive is bounded by the size of the change, not the size of the whole
+ * archive. Clients that connect mid-stream receive a `snapshot` event up
+ * front to seed their state.
+ */
+function broadcastEvent(event) {
   if (sseClients.size === 0) return;
-  const payload = `data: ${JSON.stringify(snap)}\n\n`;
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
   for (const client of sseClients) {
     try {
       client.res.write(payload);
@@ -64,11 +71,26 @@ function broadcast(snap = snapshot()) {
 }
 
 // Drain expired items so connected clients see them disappear in real time
-// without waiting for the next read.
+// without waiting for the next read. We also broadcast the *ids* that left
+// so clients can patch their state without reloading the whole archive.
 setInterval(() => {
-  const before = totalCount();
-  prune();
-  if (totalCount() !== before) broadcast();
+  const cutoff = Date.now() - ARCHIVE_TTL_MS;
+  /** @type {string[]} */
+  const expired = [];
+  for (const [kind, list] of bins) {
+    const fresh = list.filter((it) => {
+      if (it.deliveredAt < cutoff) {
+        expired.push(it.id);
+        return false;
+      }
+      return true;
+    });
+    if (fresh.length === 0) bins.delete(kind);
+    else if (fresh.length !== list.length) bins.set(kind, fresh);
+  }
+  if (expired.length > 0) {
+    broadcastEvent({ type: "expire", ids: expired });
+  }
 }, 60_000).unref();
 
 function setCors(res) {
@@ -138,9 +160,13 @@ const server = createServer(async (req, res) => {
         // Hint to nginx/edge proxies not to buffer; harmless elsewhere.
         "x-accel-buffering": "no",
       });
-      // Send the current snapshot immediately so the client doesn't have to
-      // race a separate /archive request.
-      res.write(`data: ${JSON.stringify(snapshot())}\n\n`);
+      // Send the current archive state immediately so the client doesn't
+      // have to race a separate /archive request. Subsequent events are
+      // deltas (`add` / `expire`).
+      const snap = snapshot();
+      res.write(
+        `data: ${JSON.stringify({ type: "snapshot", bins: snap.bins, ttlMs: snap.ttlMs })}\n\n`
+      );
       const hb = setInterval(() => {
         try {
           res.write(`: ping\n\n`);
@@ -176,9 +202,10 @@ const server = createServer(async (req, res) => {
       filtered.unshift(item);
       if (filtered.length > MAX_PER_KIND) filtered.length = MAX_PER_KIND;
       bins.set(item.kind, filtered);
-      const snap = snapshot();
-      sendJson(res, 200, snap);
-      broadcast(snap);
+      // The POSTing client already updated its own state optimistically; we
+      // still send back a small ack so it knows the canonical timestamp.
+      sendJson(res, 200, { ok: true, item });
+      broadcastEvent({ type: "add", item });
       return;
     }
 

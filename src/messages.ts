@@ -468,23 +468,47 @@ export class MessageWorld {
   /**
    * Subscribe to server-sent events so this client sees other visitors'
    * deliveries instantly instead of waiting for the next 60s poll. The
-   * browser auto-reconnects on transient drops; on persistent failure the
-   * periodic pullArchive() in update() keeps us current.
+   * server sends typed deltas (`snapshot` / `add` / `expire`) so the
+   * per-event payload stays small even when the archive has hundreds of
+   * items. The browser auto-reconnects on transient drops; on persistent
+   * failure the periodic pullArchive() in update() keeps us current.
    */
   private connectEventStream(): void {
     if (!ARCHIVE_API_URL || typeof EventSource === "undefined") return;
     try {
       const es = new EventSource(`${ARCHIVE_API_URL}/events`);
-      es.onmessage = (ev) => {
-        try {
-          const data = JSON.parse(ev.data);
-          this.applySnapshot(data?.bins);
-        } catch {
-          // Malformed event — ignore and wait for the next one.
-        }
-      };
+      es.onmessage = (ev) => this.dispatchServerEvent(ev.data);
     } catch {
       // EventSource construction blocked (e.g. CSP) — fall back to polling.
+    }
+  }
+
+  private dispatchServerEvent(raw: string): void {
+    let data: unknown;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (!data || typeof data !== "object") return;
+    const obj = data as { type?: string; bins?: unknown; item?: unknown; ids?: unknown };
+    switch (obj.type) {
+      case "snapshot":
+        this.applySnapshot(obj.bins);
+        return;
+      case "add": {
+        const item = sanitizeDeliveredItem(obj.item);
+        if (item) this.applyAddedItem(item);
+        return;
+      }
+      case "expire":
+        if (Array.isArray(obj.ids)) {
+          this.applyExpiredIds(obj.ids.filter((x): x is string => typeof x === "string"));
+        }
+        return;
+      default:
+        // Pre-typed-event fallback (older server) — treat as raw snapshot.
+        if (obj.bins) this.applySnapshot(obj.bins);
     }
   }
 
@@ -503,10 +527,55 @@ export class MessageWorld {
         }),
       });
       if (!resp.ok) return;
-      const data = await resp.json();
-      this.applySnapshot(data?.bins);
+      const data = (await resp.json()) as { ok?: boolean; item?: unknown; bins?: unknown };
+      if (data?.bins) {
+        // Older server flavour — apply the full snapshot.
+        this.applySnapshot(data.bins);
+      } else if (data?.item) {
+        const cleaned = sanitizeDeliveredItem(data.item);
+        if (cleaned) this.applyAddedItem(cleaned);
+      }
     } catch {
       // Optimistic update already applied; ignore network failures.
+    }
+  }
+
+  /**
+   * Apply a single delivery delta. Bumps the bin if the item is genuinely
+   * new (not a re-delivery of an id already present), and culls any
+   * floating duplicate so our dino doesn't waste a trip on it.
+   */
+  private applyAddedItem(item: DeliveredItem): void {
+    const bin = this.binFor(item.kind);
+    if (!bin) return;
+    const wasPresent = bin.delivered.some((d) => d.id === item.id);
+    bin.delivered = bin.delivered.filter((d) => d.id !== item.id);
+    bin.delivered.unshift(item);
+    pruneExpired(bin);
+    bin.count = bin.delivered.length;
+    bin.countEl.textContent = String(bin.count);
+    if (!wasPresent) bumpBin(bin);
+    if (this.archiveOverlay) this.archiveOverlay.refreshIfShowing(bin);
+    // Cull a duplicate floating card if we have one — same rationale as in
+    // applySnapshot but targeted at this single id.
+    const dup = this.messages.get(item.id);
+    if (dup && (dup.state === "entering" || dup.state === "floating")) {
+      dup.state = "gone";
+      dup.el.remove();
+    }
+  }
+
+  private applyExpiredIds(ids: string[]): void {
+    if (ids.length === 0) return;
+    const set = new Set(ids);
+    for (const bin of this.bins) {
+      const before = bin.delivered.length;
+      bin.delivered = bin.delivered.filter((d) => !set.has(d.id));
+      if (bin.delivered.length !== before) {
+        bin.count = bin.delivered.length;
+        bin.countEl.textContent = String(bin.count);
+        if (this.archiveOverlay) this.archiveOverlay.refreshIfShowing(bin);
+      }
     }
   }
 
@@ -692,6 +761,28 @@ function bumpBin(bin: CategoryBin): void {
   bin.el.classList.add("bin--bump");
 }
 
+/** Validate a single DeliveredItem-shaped value; returns null on bad shape. */
+function sanitizeDeliveredItem(raw: unknown): DeliveredItem | null {
+  if (!raw || typeof raw !== "object") return null;
+  const item = raw as Partial<DeliveredItem>;
+  if (
+    typeof item.id !== "string" ||
+    typeof item.kind !== "string" ||
+    typeof item.text !== "string" ||
+    typeof item.deliveredAt !== "number"
+  ) {
+    return null;
+  }
+  return {
+    id: item.id,
+    kind: item.kind as ContentKind,
+    text: item.text,
+    href: typeof item.href === "string" ? item.href : undefined,
+    linkLabel: typeof item.linkLabel === "string" ? item.linkLabel : undefined,
+    deliveredAt: item.deliveredAt,
+  };
+}
+
 /**
  * Validate a `{ kind: DeliveredItem[] }` map from the archive API, dropping
  * malformed entries silently. Returns null if the shape is wholly unusable.
@@ -703,24 +794,8 @@ function extractArchive(byKind: unknown): Record<string, DeliveredItem[]> | null
     if (!Array.isArray(list)) continue;
     const cleaned: DeliveredItem[] = [];
     for (const raw of list) {
-      if (!raw || typeof raw !== "object") continue;
-      const item = raw as Partial<DeliveredItem>;
-      if (
-        typeof item.id !== "string" ||
-        typeof item.kind !== "string" ||
-        typeof item.text !== "string" ||
-        typeof item.deliveredAt !== "number"
-      ) {
-        continue;
-      }
-      cleaned.push({
-        id: item.id,
-        kind: item.kind as ContentKind,
-        text: item.text,
-        href: typeof item.href === "string" ? item.href : undefined,
-        linkLabel: typeof item.linkLabel === "string" ? item.linkLabel : undefined,
-        deliveredAt: item.deliveredAt,
-      });
+      const item = sanitizeDeliveredItem(raw);
+      if (item) cleaned.push(item);
     }
     out[kind] = cleaned;
   }
