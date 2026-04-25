@@ -9,7 +9,8 @@ export type ContentKind =
   | "thought"
   | "quake"
   | "history"
-  | "space";
+  | "space"
+  | "bird";
 
 export interface ContentItem {
   /** Stable ID — used to avoid repeating the same item. */

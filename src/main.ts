@@ -7,6 +7,7 @@
 // over to grab and deliver them.
 
 import { Dino, type Mood } from "./dino.js";
+import { DinoAmbient } from "./dinoBehavior.js";
 import { MessageWorld, type FloatingMessage } from "./messages.js";
 import type { ContentKind } from "./services/content.js";
 import { WeatherClient } from "./weather.js";
@@ -50,6 +51,10 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
   // The bins we start with — one per kind that the server's narrator emits.
   // Weather is intentionally absent: it's a per-visitor ambient overlay, not
   // shared content the dino sorts.
+  // Ambient mood layer — yawns at night, shivers in snow, lies down when bored.
+  // Reads weather + clock + idle timer; reacts only when the dino isn't busy.
+  const ambient = new DinoAmbient(dino, () => weather.conditions());
+
   const messages = new MessageWorld(
     stage,
     [
@@ -59,13 +64,17 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
       { kind: "fact", label: "facts", icon: "❍" },
       { kind: "thought", label: "thoughts", icon: "✦" },
       { kind: "space", label: "space", icon: "☄" },
+      { kind: "bird", label: "birds", icon: "Λ" },
     ],
     cssW,
     cssH,
     {
       // Brief double-take whenever a fresh card lands. Goal-driven states
       // (seek/carry/deliver) ignore this, so we never disturb a delivery.
-      onSpawn: () => dino.react("surprised", 500),
+      onSpawn: () => {
+        dino.react("surprised", 500);
+        ambient.noteSpawn();
+      },
       onRadioChange: () => dino.react("curious", 900),
       onBacklogPressure: () => dino.react("sad", 900),
     }
@@ -111,6 +120,7 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
 
     courier.update(now);
     messages.update(now);
+    ambient.update(now);
 
     requestAnimationFrame(frame);
   }
@@ -260,6 +270,8 @@ function deliveryMoodFor(kind: ContentKind): Mood {
       return "curious";
     case "space":
       return "surprised"; // a small "wow" — looks up
+    case "bird":
+      return "curious"; // tilts head — what's that bird?
   }
 }
 

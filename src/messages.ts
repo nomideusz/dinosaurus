@@ -113,7 +113,7 @@ const PATTERN_BUFFER_MAX = 32;
 const PATTERN_MIN_ITEMS = 5;
 const PATTERN_MIN_DOC_COUNT = 3;
 const RADIO_STORAGE_KEY = "dinosaurus.radio.v1";
-const RADIO_CHANNELS = ["news", "quake", "history", "fact", "thought", "space"] as const;
+const RADIO_CHANNELS = ["news", "quake", "history", "fact", "thought", "space", "bird"] as const;
 const RADIO_TRACKS: Partial<Record<RadioChannel, string>> = {
   all: "/audio/radio/Mungo%20Jerry%20-%20%27%27In%20The%20Summertime%27%27.mp3",
 };
@@ -652,6 +652,7 @@ export class MessageWorld {
           <option value="fact">facts</option>
           <option value="thought">thoughts</option>
           <option value="space">space</option>
+          <option value="bird">birds</option>
         </select>
       </label>
       <button type="button" class="radio-music" aria-pressed="false">music off</button>
@@ -1295,6 +1296,8 @@ function kindLabel(kind: ContentKind): string {
       return "history";
     case "space":
       return "space";
+    case "bird":
+      return "bird";
   }
 }
 
@@ -1314,6 +1317,8 @@ function kindIcon(kind: ContentKind): string {
       return "⧗";
     case "space":
       return "☄";
+    case "bird":
+      return "Λ";
   }
 }
 
@@ -1491,6 +1496,8 @@ function radioChannelLabel(channel: RadioChannel): string {
     case "news":
     case "space":
       return channel;
+    case "bird":
+      return "birds";
   }
 }
 
@@ -1736,6 +1743,8 @@ function channelFrequency(channel: RadioChannel): number {
       return 174;
     case "space":
       return 88;
+    case "bird":
+      return 196;
     case "all":
       return 122;
   }
@@ -1761,6 +1770,9 @@ function channelScale(channel: RadioChannel): number[] {
     case "space":
       // Wider, slower-feeling intervals — more "drift" in the synth scale.
       return [root, root * 1.5, root * 2, root * 3, root * 2, root * 1.5];
+    case "bird":
+      // Bright, chirpy — narrow steps with a quick upward run.
+      return [root, root * 1.125, root * 1.33, root * 1.5, root * 1.66, root * 2];
     case "all":
       return [root, root * 1.25, root * 1.5, root * 2, root * 1.5, root * 1.125];
   }
@@ -1862,6 +1874,7 @@ function injectStylesOnce(): void {
     .msg--quake   { --accent: #f3c969; }
     .msg--history { --accent: #d4a574; }
     .msg--space   { --accent: #9eb5ff; }
+    .msg--bird    { --accent: #e0a8c0; }
     .msg:hover .msg__head { border-bottom-color: var(--accent, rgba(138, 134, 120, 0.32)); }
 
     .radio-controls {
@@ -1996,6 +2009,7 @@ function injectStylesOnce(): void {
     .bin--quake   { border-bottom: 4px solid #f3c969; }
     .bin--history { border-bottom: 4px solid #d4a574; }
     .bin--space   { border-bottom: 4px solid #9eb5ff; }
+    .bin--bird    { border-bottom: 4px solid #e0a8c0; }
 
     .archive-backdrop {
       position: absolute;
@@ -2039,6 +2053,7 @@ function injectStylesOnce(): void {
     .archive-panel[data-kind="quake"]   { --accent: #f3c969; border-top: 4px solid var(--accent); }
     .archive-panel[data-kind="history"] { --accent: #d4a574; border-top: 4px solid var(--accent); }
     .archive-panel[data-kind="space"]   { --accent: #9eb5ff; border-top: 4px solid var(--accent); }
+    .archive-panel[data-kind="bird"]    { --accent: #e0a8c0; border-top: 4px solid var(--accent); }
 
     .archive__head {
       display: flex;

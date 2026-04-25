@@ -13,6 +13,7 @@ import { createServer } from "node:http";
 import { dirname } from "node:path";
 
 import { Narrator } from "./narrator.mjs";
+import { createBirds } from "./sources/birds.mjs";
 import { DevTo } from "./sources/devto.mjs";
 import { Facts } from "./sources/facts.mjs";
 import { HackerNews } from "./sources/hn.mjs";
@@ -45,8 +46,9 @@ const ALLOWED_KINDS = new Set([
   "quake",
   "history",
   "space",
+  "bird",
 ]);
-const DEFAULT_CHANNELS = ["news", "fact", "thought", "quake", "history", "space"];
+const DEFAULT_CHANNELS = ["news", "fact", "thought", "quake", "history", "space", "bird"];
 const PACES = new Set(["chill", "normal", "busy"]);
 
 /**
@@ -751,4 +753,5 @@ narrator.registerSource(
   })
 );
 narrator.registerSource(Space);
+narrator.registerSource(createBirds());
 narrator.start();
