@@ -173,6 +173,21 @@ export class Dino {
   }
 
   /**
+   * User-directed walk. Unlike seek/carry this is not a delivery goal, so the
+   * courier may interrupt it when a floating card needs attention.
+   */
+  goTo(x: number, y: number): void {
+    if (!this.isAvailable) return;
+    this.activity = "walk";
+    this.targetX = clamp(x, this.minX, this.maxX);
+    this.targetY = clamp(y, this.minY, this.maxY);
+    this.speed = 52;
+    this.mood = "curious";
+    this.faceToward(this.targetX);
+    this.nextDecisionAt = Number.POSITIVE_INFINITY;
+  }
+
+  /**
    * Walk toward (x, y) with intent to grab a message. Wandering is
    * suspended until the goal is cleared (deliver / cancel).
    */

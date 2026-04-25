@@ -70,6 +70,17 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
 
   const courier = new Courier(dino, messages);
 
+  stage.addEventListener("pointerdown", (ev) => {
+    if (ev.button !== 0) return;
+    const target = ev.target;
+    if (target instanceof Element && target.closest("button, a, select, .msg, .archive-backdrop")) {
+      return;
+    }
+    if (!dino.isAvailable || courier.isBusy) return;
+    const rect = stage.getBoundingClientRect();
+    dino.goTo(ev.clientX - rect.left, ev.clientY - rect.top - dino.heightPx);
+  });
+
   let resizeRaf = 0;
   window.addEventListener("resize", () => {
     if (resizeRaf) cancelAnimationFrame(resizeRaf);
@@ -116,6 +127,10 @@ class Courier {
   private nextLookAt = 0;
 
   constructor(private readonly dino: Dino, private readonly messages: MessageWorld) {}
+
+  get isBusy(): boolean {
+    return this.phase !== "idle";
+  }
 
   /** Forget any current task. Used on resize / disruptions. */
   cancel(): void {
