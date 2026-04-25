@@ -8,6 +8,10 @@
     "node": ">=20"
   },
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "dev": "node --env-file=../.env --watch server.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.91.1"
   }
 }

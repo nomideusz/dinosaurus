@@ -15,7 +15,7 @@ import { DevTo } from "./sources/devto.mjs";
 import { Facts } from "./sources/facts.mjs";
 import { HackerNews } from "./sources/hn.mjs";
 import { History } from "./sources/history.mjs";
-import { Musings } from "./sources/musings.mjs";
+import { createMusings } from "./sources/musings.mjs";
 import { Quakes } from "./sources/quakes.mjs";
 import { Space } from "./sources/space.mjs";
 
@@ -63,6 +63,21 @@ const bins = new Map();
 
 /** @type {Map<string, { id: string, kind: string, text: string, href?: string, linkLabel?: string, publishedAt: number, score: number, spawnedAt: number, claimedBy?: string, claimUntil?: number }>} */
 const activeItems = new Map();
+
+/**
+ * Rolling window of recent non-thought items the narrator has emitted. Read
+ * by the Musings source so Claude can ground the dino's thoughts in what's
+ * actually been in the air. Thoughts are excluded so the dino doesn't end up
+ * reflecting on its own previous reflections.
+ */
+const RECENT_ITEMS_MAX = 16;
+/** @type {Array<{ kind: string, text: string }>} */
+const recentSpokenItems = [];
+function pushRecentItem(item) {
+  if (item.kind === "thought") return;
+  recentSpokenItems.push({ kind: item.kind, text: item.text });
+  if (recentSpokenItems.length > RECENT_ITEMS_MAX) recentSpokenItems.shift();
+}
 
 /** @type {Set<{ res: import("node:http").ServerResponse, hb: NodeJS.Timeout }>} */
 const sseClients = new Set();
@@ -598,6 +613,7 @@ const narrator = new Narrator({
     if (isKnown(item.id)) return;
     const active = activeItemFromSource(item);
     activeItems.set(active.id, active);
+    pushRecentItem(item);
     broadcastEvent({ type: "item", item: active });
     broadcastRealtimeForItem({ type: "item_spawned", item: active }, active);
   },
@@ -611,6 +627,11 @@ narrator.registerSource(DevTo);
 narrator.registerSource(Quakes);
 narrator.registerSource(History);
 narrator.registerSource(Facts);
-narrator.registerSource(Musings);
+narrator.registerSource(
+  createMusings({
+    apiKey: process.env.ANTHROPIC_API_KEY,
+    getRecentItems: () => recentSpokenItems.slice(),
+  })
+);
 narrator.registerSource(Space);
 narrator.start();
