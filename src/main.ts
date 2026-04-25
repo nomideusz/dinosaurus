@@ -73,9 +73,7 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
   // courier loop takes it from there.
   const narrator = new Narrator({
     cadenceMs: 9_000,
-    onItem: (item) => {
-      messages.spawn(item);
-    },
+    onItem: (item) => messages.spawn(item) !== null,
   });
   narrator.registerSource(new HackerNewsSource());
   narrator.registerSource(new WeatherSource());

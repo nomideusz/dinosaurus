@@ -13,8 +13,12 @@ interface SourceState {
 }
 
 export interface NarratorOptions {
-  /** Called whenever the narrator wants to surface a new item. */
-  onItem: (item: ContentItem) => void;
+  /**
+   * Called whenever the narrator wants to surface a new item. Return `false`
+   * to tell the narrator the item could not be used (e.g. it's already in
+   * the shared archive); the narrator will un-mark it and try again sooner.
+   */
+  onItem: (item: ContentItem) => boolean | void;
   /** Called whenever the *known* item list changes (used to populate the feed). */
   onPool?: (items: ContentItem[]) => void;
   /** Optional status hook (e.g. "fetching weather"). */
@@ -108,7 +112,15 @@ export class Narrator {
 
     this.spokenIds.add(item.id);
     this.lastSpokenKindAt[item.kind] = Date.now();
-    this.opts.onItem(item);
+    const accepted = this.opts.onItem(item) !== false;
+
+    if (!accepted) {
+      // The receiver rejected the item (e.g. already in the shared archive).
+      // Keep it marked spoken for a short while so we don't immediately pick
+      // it again, but try the *next* candidate sooner than a full cadence.
+      this.nextSayAt = now + 1_500;
+      return;
+    }
 
     // Random cadence between bubbles, plus a base.
     const base = this.opts.cadenceMs ?? 14_000;

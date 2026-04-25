@@ -211,13 +211,26 @@ export class MessageWorld {
     return this.messages.get(id);
   }
 
+  /** True if any bin's archive already contains an item with this id. */
+  isInArchive(id: string): boolean {
+    for (const bin of this.bins) {
+      for (const d of bin.delivered) if (d.id === id) return true;
+    }
+    return false;
+  }
+
   /**
    * Spawn a new message card from the given content item. The card slides in
    * from a random edge (left/right/top) and settles at a randomised home in
    * the upper portion of the viewport.
+   *
+   * Returns null when the item is already known — either currently on screen,
+   * or already sorted into a bin by some other visitor's dino. This stops the
+   * dino from "delivering" cards that would just be duplicates server-side.
    */
   spawn(item: ContentItem): FloatingMessage | null {
     if (this.messages.has(item.id)) return this.messages.get(item.id) ?? null;
+    if (this.isInArchive(item.id)) return null;
     if (this.messages.size >= this.maxConcurrent) return null;
     if (!this.binFor(item.kind)) return null;
 
@@ -486,6 +499,18 @@ export class MessageWorld {
       bin.count = bin.delivered.length;
       bin.countEl.textContent = String(bin.count);
       if (this.archiveOverlay) this.archiveOverlay.refreshIfShowing(bin);
+    }
+    // If a refresh reveals that something currently floating is already in
+    // the shared archive (delivered by another visitor's dino), quietly cull
+    // it so we don't ask our dino to do the same work for no count change.
+    // We only touch idle states — claimed/carried/delivering items keep
+    // playing out their animation to avoid visual jank.
+    for (const m of [...this.messages.values()]) {
+      if (m.state !== "entering" && m.state !== "floating") continue;
+      if (this.isInArchive(m.id)) {
+        m.state = "gone";
+        m.el.remove();
+      }
     }
   }
 
