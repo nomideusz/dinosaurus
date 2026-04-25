@@ -30,6 +30,25 @@ const ALLOWED_KINDS = new Set([
   "history",
 ]);
 
+/**
+ * Origins allowed to call /archive and /events. Configurable via env var so
+ * a future custom domain (or staging frontend) can be added without a
+ * redeploy of the source. Localhost ports cover Vite's dev (5173/5174) and
+ * preview (4173) servers and the static-server.mjs default (4173).
+ */
+const ALLOWED_ORIGINS = new Set(
+  (process.env.ALLOWED_ORIGINS ??
+    [
+      "https://dino.zaur.app",
+      "http://localhost:5173",
+      "http://localhost:5174",
+      "http://localhost:4173",
+    ].join(","))
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+);
+
 /** @type {Map<string, Array<{ id: string, kind: string, text: string, href?: string, linkLabel?: string, deliveredAt: number }>>} */
 const bins = new Map();
 
@@ -101,15 +120,25 @@ setInterval(() => {
   }
 }, 60_000).unref();
 
-function setCors(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+/**
+ * Echo back the request Origin only if it's in our allowlist. Browsers
+ * block cross-origin XHR/fetch when the header is missing, which is the
+ * desired behaviour for unknown origins. Same-origin and tooling requests
+ * (no Origin header — e.g. curl) are unaffected.
+ */
+function setCors(req, res) {
+  const origin = req.headers.origin;
+  if (typeof origin === "string" && ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "content-type");
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-function sendJson(res, status, body) {
-  setCors(res);
+function sendJson(req, res, status, body) {
+  setCors(req, res);
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   res.end(JSON.stringify(body));
 }
@@ -141,7 +170,7 @@ function validate(item) {
 const server = createServer(async (req, res) => {
   try {
     if (req.method === "OPTIONS") {
-      setCors(res);
+      setCors(req, res);
       res.writeHead(204);
       res.end();
       return;
@@ -150,17 +179,17 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
 
     if (req.method === "GET" && url.pathname === "/health") {
-      sendJson(res, 200, { ok: true });
+      sendJson(req, res, 200, { ok: true });
       return;
     }
 
     if (req.method === "GET" && url.pathname === "/archive") {
-      sendJson(res, 200, snapshot());
+      sendJson(req, res, 200, snapshot());
       return;
     }
 
     if (req.method === "GET" && url.pathname === "/events") {
-      setCors(res);
+      setCors(req, res);
       res.writeHead(200, {
         "content-type": "text/event-stream; charset=utf-8",
         "cache-control": "no-cache, no-transform",
@@ -196,12 +225,12 @@ const server = createServer(async (req, res) => {
       try {
         body = await readJson(req);
       } catch {
-        sendJson(res, 400, { error: "invalid json" });
+        sendJson(req, res, 400, { error: "invalid json" });
         return;
       }
       const item = validate(body);
       if (!item) {
-        sendJson(res, 400, { error: "invalid item" });
+        sendJson(req, res, 400, { error: "invalid item" });
         return;
       }
       const list = bins.get(item.kind) ?? [];
@@ -212,15 +241,15 @@ const server = createServer(async (req, res) => {
       bins.set(item.kind, filtered);
       // The POSTing client already updated its own state optimistically; we
       // still send back a small ack so it knows the canonical timestamp.
-      sendJson(res, 200, { ok: true, item });
+      sendJson(req, res, 200, { ok: true, item });
       broadcastEvent({ type: "add", item });
       return;
     }
 
-    sendJson(res, 404, { error: "not found" });
+    sendJson(req, res, 404, { error: "not found" });
   } catch (err) {
     console.error("[archive] handler error:", err);
-    sendJson(res, 500, { error: "internal error" });
+    sendJson(req, res, 500, { error: "internal error" });
   }
 });
 
