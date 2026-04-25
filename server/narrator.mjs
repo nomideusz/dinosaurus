@@ -7,6 +7,14 @@
 // recency, dampen the kind of the previous item to keep variety, and add a
 // tiny jitter so order doesn't feel rigid.
 
+import { setMaxListeners } from "node:events";
+
+// Per-source AbortController. Sources that fan out many concurrent fetchJson
+// calls (HackerNews fetches every story in parallel) attach one abort listener
+// per child request to the parent signal, easily blowing through Node's default
+// of 10 — bump the ceiling so we don't get spurious MaxListenersExceededWarnings.
+const ABORT_LISTENERS_PER_SOURCE = 64;
+
 const DEFAULT_CADENCE_MS = 9_000;
 const CADENCE_JITTER_MS = 8_000;
 const SOURCE_TICK_MS = 60_000;
@@ -75,6 +83,7 @@ export class Narrator {
 
   async refresh(state) {
     const ctrl = new AbortController();
+    setMaxListeners(ABORT_LISTENERS_PER_SOURCE, ctrl.signal);
     state.inFlight = ctrl;
     try {
       const items = await state.source.fetchItems(ctrl.signal);
