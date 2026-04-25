@@ -1,11 +1,11 @@
 // Tiny in-memory archive for the dino's sorted items.
 //
 // Everyone who loads the page shares the same archive, so a visitor who shows
-// up later sees what the dino has been sorting for the past two hours. Items
-// older than ARCHIVE_TTL_MS are pruned on every read and write.
+// up later sees what the dino has been sorting for the past day. Items older
+// than ARCHIVE_TTL_MS are pruned on every read and write.
 //
 // No database — the data is intentionally ephemeral. A redeploy clears it,
-// which is fine for a 2-hour rolling window.
+// which is fine for a 24-hour rolling window.
 
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
@@ -19,9 +19,9 @@ import { Musings } from "./sources/musings.mjs";
 import { Quakes } from "./sources/quakes.mjs";
 
 const PORT = Number(process.env.PORT ?? 8080);
-const ARCHIVE_TTL_MS = 2 * 60 * 60 * 1000;
+const ARCHIVE_TTL_MS = 24 * 60 * 60 * 1000;
 /** Hard cap per kind so a misbehaving client can't blow up memory. */
-const MAX_PER_KIND = 200;
+const MAX_PER_KIND = 1000;
 const ACTIVE_ITEM_TTL_MS = 5 * 60_000;
 const CLAIM_LEASE_MS = 45_000;
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";

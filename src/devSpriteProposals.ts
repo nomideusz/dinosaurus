@@ -289,7 +289,7 @@ function injectStylesOnce(): void {
       padding: 10px;
       background: var(--bg);
       color: var(--ink-soft);
-      font: 10px/1 ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+      font: 10px/1 "Ioskeley Mono", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
     }
   `;
   document.head.appendChild(style);

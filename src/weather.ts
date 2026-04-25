@@ -268,7 +268,7 @@ function injectStylesOnce(): void {
       color: var(--ink, #e8e4d8);
       border: 1px solid var(--ink-soft, #8a8678);
       border-radius: 2px;
-      font: 500 11.5px/1.3 ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+      font: 500 11.5px/1.3 "Ioskeley Mono", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
       letter-spacing: 0.04em;
       box-shadow: 0 4px 0 rgba(0, 0, 0, 0.22);
       pointer-events: none;

@@ -99,7 +99,7 @@ export interface MessageWorldOptions {
  * server enforces the same window; we keep this constant client-side so we
  * can prune defensively if the network is unavailable.
  */
-const ARCHIVE_TTL_MS = 2 * 60 * 60 * 1000;
+const ARCHIVE_TTL_MS = 24 * 60 * 60 * 1000;
 /** How often the client polls the server for items others have sorted. */
 const ARCHIVE_REFRESH_INTERVAL_MS = 60_000;
 const CARD_SPAWN_GAP_MS = 2_500;
@@ -281,6 +281,7 @@ export class MessageWorld {
     el.className = `msg msg--${item.kind}`;
     el.innerHTML = `
       <div class="msg__head">
+        <span class="msg__icon" aria-hidden="true">${escapeHtml(kindIcon(item.kind))}</span>
         <span class="msg__kind">${escapeHtml(kindLabel(item.kind))}</span>
       </div>
       <div class="msg__body">${escapeHtml(item.text)}</div>
@@ -890,11 +891,14 @@ export class MessageWorld {
 class ArchiveOverlay {
   private readonly backdrop: HTMLDivElement;
   private readonly panel: HTMLDivElement;
+  private readonly iconEl: HTMLSpanElement;
   private readonly titleEl: HTMLSpanElement;
   private readonly countEl: HTMLSpanElement;
+  private readonly searchEl: HTMLInputElement;
   private readonly listEl: HTMLDivElement;
   private readonly emptyEl: HTMLDivElement;
   private currentBin: CategoryBin | null = null;
+  private searchQuery = "";
   private readonly onKey: (e: KeyboardEvent) => void;
 
   constructor(parent: HTMLElement) {
@@ -909,15 +913,26 @@ class ArchiveOverlay {
     this.panel.setAttribute("aria-label", "Archive");
     this.panel.innerHTML = `
       <div class="archive__head">
+        <span class="archive__icon" aria-hidden="true"></span>
         <span class="archive__title"></span>
         <span class="archive__count"></span>
+        <input
+          type="search"
+          class="archive__search"
+          placeholder="filter…"
+          aria-label="Filter items"
+          autocomplete="off"
+          spellcheck="false"
+        />
         <button type="button" class="archive__close" aria-label="Close archive">×</button>
       </div>
       <div class="archive__list" role="list"></div>
-      <div class="archive__empty">// nothing here yet — dino hasn't sorted anything into this bin.</div>
+      <div class="archive__empty"></div>
     `;
+    this.iconEl = this.panel.querySelector<HTMLSpanElement>(".archive__icon")!;
     this.titleEl = this.panel.querySelector<HTMLSpanElement>(".archive__title")!;
     this.countEl = this.panel.querySelector<HTMLSpanElement>(".archive__count")!;
+    this.searchEl = this.panel.querySelector<HTMLInputElement>(".archive__search")!;
     this.listEl = this.panel.querySelector<HTMLDivElement>(".archive__list")!;
     this.emptyEl = this.panel.querySelector<HTMLDivElement>(".archive__empty")!;
 
@@ -931,12 +946,32 @@ class ArchiveOverlay {
       .querySelector<HTMLButtonElement>(".archive__close")!
       .addEventListener("click", () => this.hide());
 
+    this.searchEl.addEventListener("input", () => {
+      this.searchQuery = this.searchEl.value.trim().toLowerCase();
+      if (this.currentBin) this.render(this.currentBin);
+    });
+
     this.onKey = (e) => {
-      if (e.key === "Escape" && this.currentBin) this.hide();
+      if (e.key === "Escape" && this.currentBin) {
+        // First Escape just clears a non-empty filter; a second one closes.
+        if (this.searchQuery) {
+          this.searchEl.value = "";
+          this.searchQuery = "";
+          this.render(this.currentBin);
+          return;
+        }
+        this.hide();
+      }
     };
   }
 
   show(bin: CategoryBin): void {
+    // Switching to a different bin starts with a fresh filter.
+    if (this.currentBin !== bin) {
+      this.searchQuery = "";
+      this.searchEl.value = "";
+      this.listEl.scrollTop = 0;
+    }
     this.currentBin = bin;
     this.render(bin);
     this.backdrop.removeAttribute("hidden");
@@ -959,36 +994,110 @@ class ArchiveOverlay {
   }
 
   private render(bin: CategoryBin): void {
+    this.iconEl.textContent = kindIcon(bin.kind);
     this.titleEl.textContent = bin.label;
-    this.countEl.textContent = `${bin.delivered.length} item${
-      bin.delivered.length === 1 ? "" : "s"
-    }`;
     this.panel.dataset.kind = bin.kind;
 
-    if (bin.delivered.length === 0) {
+    // Newest first regardless of how items got into the array (server snapshots
+    // and local pushes can interleave). Cheap on a few hundred items.
+    const sorted = bin.delivered.slice().sort((a, b) => b.deliveredAt - a.deliveredAt);
+    const visible = this.searchQuery
+      ? sorted.filter((it) => it.text.toLowerCase().includes(this.searchQuery))
+      : sorted;
+
+    this.countEl.textContent = this.searchQuery
+      ? `${visible.length} of ${sorted.length}`
+      : `${sorted.length} item${sorted.length === 1 ? "" : "s"}`;
+
+    if (visible.length === 0) {
       this.listEl.innerHTML = "";
+      this.emptyEl.textContent = this.searchQuery
+        ? `// no matches for "${this.searchQuery}"`
+        : "// nothing here yet — dino hasn't sorted anything into this bin.";
       this.emptyEl.style.display = "";
       return;
     }
     this.emptyEl.style.display = "none";
-    this.listEl.innerHTML = bin.delivered
-      .map((item) => {
-        const time = formatRelative(item.deliveredAt);
-        const link = item.href
-          ? `<a class="archive__link" href="${escapeHtml(item.href)}" target="_blank" rel="noopener">${escapeHtml(item.linkLabel ?? "open ↗")}</a>`
-          : "";
+
+    // Group by time bucket so 24h of items doesn't read as a wall of text.
+    const groups = groupByBucket(visible);
+    this.listEl.innerHTML = groups
+      .map((g) => {
+        const itemsHtml = g.items
+          .map((item) => {
+            const time = formatRelative(item.deliveredAt);
+            const link = item.href
+              ? `<a class="archive__link" href="${escapeHtml(item.href)}" target="_blank" rel="noopener">${escapeHtml(item.linkLabel ?? "open ↗")}</a>`
+              : "";
+            return `
+              <article class="archive__item" role="listitem">
+                <div class="archive__meta">
+                  <span class="archive__time">${escapeHtml(time)}</span>
+                </div>
+                <div class="archive__body">${escapeHtml(highlightMatches(item.text, this.searchQuery))}</div>
+                ${link}
+              </article>
+            `;
+          })
+          .join("");
         return `
-          <article class="archive__item" role="listitem">
-            <div class="archive__meta">
-              <span class="archive__time">${escapeHtml(time)}</span>
-            </div>
-            <div class="archive__body">${escapeHtml(item.text)}</div>
-            ${link}
-          </article>
+          <div class="archive__group-head">
+            <span class="archive__group-label">${escapeHtml(g.label)}</span>
+            <span class="archive__group-count">${g.items.length}</span>
+          </div>
+          ${itemsHtml}
         `;
       })
       .join("");
   }
+}
+
+/**
+ * Group items into "Last hour", "Earlier today", "Yesterday", "Older" buckets.
+ * Buckets are returned newest-first, with empty ones omitted.
+ */
+function groupByBucket(items: DeliveredItem[]): Array<{ label: string; items: DeliveredItem[] }> {
+  const order = ["Last hour", "Earlier today", "Yesterday", "Older"];
+  const map = new Map<string, DeliveredItem[]>();
+  for (const item of items) {
+    const label = bucketLabel(item.deliveredAt);
+    let arr = map.get(label);
+    if (!arr) {
+      arr = [];
+      map.set(label, arr);
+    }
+    arr.push(item);
+  }
+  return order.filter((k) => map.has(k)).map((k) => ({ label: k, items: map.get(k)! }));
+}
+
+function bucketLabel(ms: number): string {
+  const diff = Date.now() - ms;
+  if (diff < 3_600_000) return "Last hour";
+  const now = new Date();
+  const then = new Date(ms);
+  if (sameLocalDay(now, then)) return "Earlier today";
+  const yest = new Date(now);
+  yest.setDate(yest.getDate() - 1);
+  if (sameLocalDay(yest, then)) return "Yesterday";
+  return "Older";
+}
+
+function sameLocalDay(a: Date, b: Date): boolean {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
+
+/** Wrap any `<mark>`-able substrings around the active search query. */
+function highlightMatches(text: string, query: string): string {
+  const escaped = escapeHtml(text);
+  if (!query) return escaped;
+  // Re-escape the query and turn it into a case-insensitive regex.
+  const safe = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return escaped.replace(new RegExp(safe, "gi"), (m) => `<mark class="archive__hit">${m}</mark>`);
 }
 
 function formatRelative(ms: number): string {
@@ -1104,6 +1213,23 @@ function kindLabel(kind: ContentKind): string {
       return "quake";
     case "history":
       return "history";
+  }
+}
+
+function kindIcon(kind: ContentKind): string {
+  switch (kind) {
+    case "news":
+      return "▤";
+    case "weather":
+      return "⛅";
+    case "fact":
+      return "❍";
+    case "thought":
+      return "✦";
+    case "quake":
+      return "↯";
+    case "history":
+      return "⧗";
   }
 }
 
@@ -1482,7 +1608,7 @@ function injectStylesOnce(): void {
       border: 1.5px solid var(--ink, #e8e4d8);
       border-radius: 2px;
       box-shadow: 0 6px 0 rgba(0, 0, 0, 0.25);
-      font: 500 12.5px/1.45 ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+      font: 500 12.5px/1.45 "Ioskeley Mono", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
       pointer-events: auto;
       opacity: 0;
       transition: opacity 240ms ease, transform 320ms cubic-bezier(.2,.7,.2,1.4),
@@ -1503,15 +1629,24 @@ function injectStylesOnce(): void {
 
     .msg__head {
       display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 4px;
-      color: var(--ink-soft, #8a8678);
+      align-items: baseline;
+      gap: 6px;
+      margin-bottom: 6px;
+      padding-bottom: 4px;
+      border-bottom: 1px dashed rgba(138, 134, 120, 0.32);
+      color: var(--accent, var(--ink-soft, #8a8678));
       font-size: 10px;
-      letter-spacing: 0.12em;
+      letter-spacing: 0.16em;
       text-transform: uppercase;
     }
-    .msg__kind::before { content: "// "; opacity: 0.7; }
+    .msg__icon {
+      font-size: 12px;
+      line-height: 1;
+      letter-spacing: 0;
+      text-transform: none;
+      /* Aligns the chunky glyph with the lowercase-derived baseline. */
+      transform: translateY(1px);
+    }
 
     .msg__body {
       white-space: pre-wrap;
@@ -1531,13 +1666,15 @@ function injectStylesOnce(): void {
       color: var(--paper, #1f1e26);
     }
 
-    /* kind-specific accent colour on the left edge */
-    .msg--news    { border-left-width: 4px; border-left-color: #ff9a73; }
-    .msg--weather { border-left-width: 4px; border-left-color: #7ec8ff; }
-    .msg--fact    { border-left-width: 4px; border-left-color: #8dd9a8; }
-    .msg--thought { border-left-width: 4px; border-left-color: #c8a8ff; }
-    .msg--quake   { border-left-width: 4px; border-left-color: #f3c969; }
-    .msg--history { border-left-width: 4px; border-left-color: #d4a574; }
+    /* Per-kind accent colour. Applied to the head (icon + label) and the
+       hairline on hover — quieter than the old colored edge. */
+    .msg--news    { --accent: #ff9a73; }
+    .msg--weather { --accent: #7ec8ff; }
+    .msg--fact    { --accent: #8dd9a8; }
+    .msg--thought { --accent: #c8a8ff; }
+    .msg--quake   { --accent: #f3c969; }
+    .msg--history { --accent: #d4a574; }
+    .msg:hover .msg__head { border-bottom-color: var(--accent, rgba(138, 134, 120, 0.32)); }
 
     .radio-controls {
       position: absolute;
@@ -1552,7 +1689,7 @@ function injectStylesOnce(): void {
       color: var(--ink, #e8e4d8);
       border: 1px solid var(--ink-soft, #8a8678);
       border-radius: 2px;
-      font: 600 10px/1.2 ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+      font: 600 10px/1.2 "Ioskeley Mono", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
       letter-spacing: 0.08em;
       text-transform: uppercase;
       z-index: 5;
@@ -1613,7 +1750,7 @@ function injectStylesOnce(): void {
       border: 1.5px solid var(--ink, #e8e4d8);
       border-radius: 2px;
       color: var(--ink, #e8e4d8);
-      font: 600 11px/1.2 ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+      font: 600 11px/1.2 "Ioskeley Mono", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
       letter-spacing: 0.08em;
       text-transform: uppercase;
       text-align: left;
@@ -1689,8 +1826,8 @@ function injectStylesOnce(): void {
     .archive-backdrop--open { opacity: 1; }
 
     .archive-panel {
-      width: min(560px, 100%);
-      max-height: min(72vh, 560px);
+      width: min(620px, 100%);
+      max-height: min(80vh, 720px);
       display: flex;
       flex-direction: column;
       background: var(--paper, #1f1e26);
@@ -1700,16 +1837,18 @@ function injectStylesOnce(): void {
       box-shadow: 0 14px 0 rgba(0, 0, 0, 0.35);
       transform: translateY(8px);
       transition: transform 200ms cubic-bezier(.2,.7,.2,1.4);
-      font: 500 13px/1.5 ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+      font: 500 13px/1.5 "Ioskeley Mono", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
     }
     .archive-backdrop--open .archive-panel { transform: translateY(0); }
 
-    .archive-panel[data-kind="news"]    { border-top: 4px solid #ff9a73; }
-    .archive-panel[data-kind="weather"] { border-top: 4px solid #7ec8ff; }
-    .archive-panel[data-kind="fact"]    { border-top: 4px solid #8dd9a8; }
-    .archive-panel[data-kind="thought"] { border-top: 4px solid #c8a8ff; }
-    .archive-panel[data-kind="quake"]   { border-top: 4px solid #f3c969; }
-    .archive-panel[data-kind="history"] { border-top: 4px solid #d4a574; }
+    /* Per-kind accent — drives the top border, the head icon colour, and
+       hover highlights. Match the card styling. */
+    .archive-panel[data-kind="news"]    { --accent: #ff9a73; border-top: 4px solid var(--accent); }
+    .archive-panel[data-kind="weather"] { --accent: #7ec8ff; border-top: 4px solid var(--accent); }
+    .archive-panel[data-kind="fact"]    { --accent: #8dd9a8; border-top: 4px solid var(--accent); }
+    .archive-panel[data-kind="thought"] { --accent: #c8a8ff; border-top: 4px solid var(--accent); }
+    .archive-panel[data-kind="quake"]   { --accent: #f3c969; border-top: 4px solid var(--accent); }
+    .archive-panel[data-kind="history"] { --accent: #d4a574; border-top: 4px solid var(--accent); }
 
     .archive__head {
       display: flex;
@@ -1717,22 +1856,51 @@ function injectStylesOnce(): void {
       gap: 10px;
       padding: 12px 14px;
       border-bottom: 1px solid var(--ink-soft, #8a8678);
+      flex-wrap: wrap;
+    }
+    .archive__icon {
+      font-size: 14px;
+      line-height: 1;
+      color: var(--accent, var(--ink, #e8e4d8));
     }
     .archive__title {
       flex: 0 0 auto;
       font-weight: 700;
-      letter-spacing: 0.12em;
+      letter-spacing: 0.16em;
       text-transform: uppercase;
       font-size: 12px;
+      color: var(--accent, var(--ink, #e8e4d8));
     }
-    .archive__title::before { content: "// "; opacity: 0.7; }
     .archive__count {
-      flex: 1;
+      flex: 0 0 auto;
       color: var(--ink-soft, #8a8678);
       font-size: 11px;
       letter-spacing: 0.08em;
       text-transform: uppercase;
     }
+    .archive__search {
+      flex: 1 1 140px;
+      min-width: 100px;
+      background: var(--bg, #14141a);
+      color: var(--ink, #e8e4d8);
+      border: 1px solid var(--ink-soft, #8a8678);
+      border-radius: 1px;
+      padding: 5px 8px;
+      font: inherit;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: none;
+      outline: none;
+    }
+    .archive__search::placeholder {
+      color: var(--ink-soft, #8a8678);
+      opacity: 0.7;
+    }
+    .archive__search:focus {
+      border-color: var(--accent, var(--ink, #e8e4d8));
+    }
+    /* Strip the native search clear cross (Webkit) — we have our own affordance. */
+    .archive__search::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
     .archive__close {
       background: transparent;
       border: 1px solid var(--ink, #e8e4d8);
@@ -1756,7 +1924,7 @@ function injectStylesOnce(): void {
       padding: 8px 14px 14px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 8px;
     }
     .archive__list::-webkit-scrollbar { width: 8px; }
     .archive__list::-webkit-scrollbar-thumb {
@@ -1764,11 +1932,33 @@ function injectStylesOnce(): void {
       border-radius: 1px;
     }
 
+    .archive__group-head {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      margin: 12px 0 2px;
+      padding-bottom: 4px;
+      border-bottom: 1px dashed rgba(138, 134, 120, 0.35);
+      color: var(--ink-soft, #8a8678);
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+    .archive__group-head:first-child { margin-top: 0; }
+    .archive__group-label { font-weight: 700; }
+    .archive__group-count {
+      margin-left: auto;
+      color: var(--ink-soft, #8a8678);
+      opacity: 0.8;
+    }
+
     .archive__item {
       padding: 10px 12px;
       border: 1px solid var(--ink-soft, #8a8678);
       border-radius: 2px;
+      transition: border-color 160ms ease;
     }
+    .archive__item:hover { border-color: var(--accent, var(--ink, #e8e4d8)); }
     .archive__meta {
       display: flex;
       gap: 8px;
@@ -1781,6 +1971,12 @@ function injectStylesOnce(): void {
     .archive__body {
       white-space: pre-wrap;
       word-break: break-word;
+    }
+    .archive__hit {
+      background: var(--accent, var(--ink, #e8e4d8));
+      color: var(--paper, #1f1e26);
+      padding: 0 2px;
+      border-radius: 1px;
     }
     .archive__link {
       display: inline-block;

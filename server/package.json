@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Shared 2-hour archive of items the dino has sorted, for the dinosaurus front-end.",
+  "description": "Shared 24-hour archive of items the dino has sorted, for the dinosaurus front-end.",
   "engines": {
     "node": ">=20"
   },

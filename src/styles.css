@@ -1,3 +1,12 @@
+@font-face {
+  font-family: "Ioskeley Mono";
+  src: url("/fonts/IoskeleyMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  /* Don't block first paint — render with the system mono until the file lands. */
+  font-display: swap;
+}
+
 :root {
   /* Mirrors the values in src/theme.ts. Update both when changing the palette. */
   --bg:        #14141a;
@@ -5,7 +14,9 @@
   --ink:       #e8e4d8;
   --ink-soft:  #8a8678;
 
-  font-family: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  --mono-stack: "Ioskeley Mono", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  font-family: var(--mono-stack);
   color-scheme: dark;
 }
 
