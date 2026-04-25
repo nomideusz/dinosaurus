@@ -47,6 +47,15 @@ async function tryFile(path) {
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    if (req.method === "GET" && url.pathname === "/health") {
+      res.writeHead(200, {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+      });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+
     let target = safeJoin(ROOT, url.pathname === "/" ? "/index.html" : url.pathname);
     if (!target) {
       res.writeHead(400);

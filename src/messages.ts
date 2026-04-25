@@ -114,6 +114,7 @@ export class MessageWorld {
   private archiveOverlay: ArchiveOverlay | null = null;
   private nextRefreshAt = 0;
   private readonly onSpawn?: (item: ContentItem) => void;
+  private archiveWarningShown = false;
 
   constructor(
     parent: HTMLElement,
@@ -466,10 +467,14 @@ export class MessageWorld {
     if (!ARCHIVE_API_URL) return;
     try {
       const resp = await fetch(`${ARCHIVE_API_URL}/archive`, { cache: "no-store" });
-      if (!resp.ok) return;
+      if (!resp.ok) {
+        this.warnArchiveSync(`GET /archive returned ${resp.status}`);
+        return;
+      }
       const data = await resp.json();
       this.applySnapshot(data?.bins);
-    } catch {
+    } catch (err) {
+      this.warnArchiveSync("GET /archive failed", err);
       // Network/CORS error — keep current local state.
     }
   }
@@ -487,7 +492,9 @@ export class MessageWorld {
     try {
       const es = new EventSource(`${ARCHIVE_API_URL}/events`);
       es.onmessage = (ev) => this.dispatchServerEvent(ev.data);
-    } catch {
+      es.onerror = () => this.warnArchiveSync("EventSource /events failed; using polling fallback");
+    } catch (err) {
+      this.warnArchiveSync("EventSource /events could not start", err);
       // EventSource construction blocked (e.g. CSP) — fall back to polling.
     }
   }
@@ -540,7 +547,10 @@ export class MessageWorld {
           linkLabel: item.linkLabel,
         }),
       });
-      if (!resp.ok) return;
+      if (!resp.ok) {
+        this.warnArchiveSync(`POST /archive returned ${resp.status}`);
+        return;
+      }
       const data = (await resp.json()) as { ok?: boolean; item?: unknown; bins?: unknown };
       if (data?.bins) {
         // Older server flavour — apply the full snapshot.
@@ -549,9 +559,19 @@ export class MessageWorld {
         const cleaned = sanitizeDeliveredItem(data.item);
         if (cleaned) this.applyAddedItem(cleaned);
       }
-    } catch {
+    } catch (err) {
+      this.warnArchiveSync("POST /archive failed", err);
       // Optimistic update already applied; ignore network failures.
     }
+  }
+
+  private warnArchiveSync(message: string, err?: unknown): void {
+    if (this.archiveWarningShown) return;
+    this.archiveWarningShown = true;
+    console.warn(
+      `[dinosaurus] shared archive unavailable (${message}). Check VITE_ARCHIVE_URL and ALLOWED_ORIGINS.`,
+      err ?? ""
+    );
   }
 
   /**

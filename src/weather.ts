@@ -34,6 +34,7 @@ const REFRESH_MS = 15 * 60_000;
 const FIRST_SHOW_DELAY_MS = 4_000;
 const REPEAT_SHOW_INTERVAL_MS = 6 * 60_000;
 const CARD_DURATION_MS = 9_000;
+const WEATHER_FETCH_TIMEOUT_MS = 8_000;
 const FALLBACK_GEO: Geo = { lat: 51.5074, lon: -0.1278, city: "London" };
 
 export class WeatherClient {
@@ -65,7 +66,7 @@ export class WeatherClient {
         "current",
         "temperature_2m,apparent_temperature,weather_code,is_day,precipitation"
       );
-      const res = await fetch(url, { headers: { accept: "application/json" } });
+      const res = await fetchWithTimeout(url, { headers: { accept: "application/json" } });
       if (!res.ok) return;
       const data = (await res.json()) as { current?: OpenMeteoCurrent };
       const c = data.current;
@@ -82,7 +83,7 @@ export class WeatherClient {
   private async geo(): Promise<Geo> {
     if (this.cachedGeo) return this.cachedGeo;
     try {
-      const res = await fetch("https://ipapi.co/json/");
+      const res = await fetchWithTimeout("https://ipapi.co/json/");
       if (res.ok) {
         const j = (await res.json()) as { latitude?: number; longitude?: number; city?: string };
         if (typeof j.latitude === "number" && typeof j.longitude === "number") {
@@ -99,6 +100,16 @@ export class WeatherClient {
     }
     this.cachedGeo = FALLBACK_GEO;
     return this.cachedGeo;
+  }
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const ctrl = new AbortController();
+  const timeout = window.setTimeout(() => ctrl.abort(), WEATHER_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: ctrl.signal });
+  } finally {
+    window.clearTimeout(timeout);
   }
 }
 

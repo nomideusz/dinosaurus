@@ -10,6 +10,9 @@
 const DEFAULT_CADENCE_MS = 9_000;
 const CADENCE_JITTER_MS = 8_000;
 const SOURCE_TICK_MS = 60_000;
+const MAX_POOL_ITEMS = 500;
+const MAX_SPOKEN_IDS = 1_000;
+const POOL_MAX_AGE_MS = 48 * 60 * 60_000;
 
 export class Narrator {
   /**
@@ -83,6 +86,7 @@ export class Narrator {
           this.pool.set(it.id, it);
         }
       }
+      this.pruneMemory(Date.now());
       this.opts.logger?.info?.(`[narrator] refreshed ${state.source.name} (+${items.length})`);
     } catch (err) {
       if (err && err.name !== "AbortError") {
@@ -100,6 +104,7 @@ export class Narrator {
     if (!item) return;
     this.spokenIds.add(item.id);
     this.lastSpokenKindAt[item.kind] = now;
+    this.pruneMemory(now);
     this.opts.onItem(item);
     const base = this.opts.cadenceMs ?? DEFAULT_CADENCE_MS;
     this.nextSayAt = now + base + Math.random() * CADENCE_JITTER_MS;
@@ -137,5 +142,35 @@ export class Narrator {
       }
     }
     return best;
+  }
+
+  pruneMemory(now) {
+    const cutoff = now - POOL_MAX_AGE_MS;
+    for (const [id, item] of this.pool) {
+      if (typeof item.publishedAt === "number" && item.publishedAt < cutoff) {
+        this.pool.delete(id);
+        this.spokenIds.delete(id);
+      }
+    }
+
+    if (this.pool.size > MAX_POOL_ITEMS) {
+      const overflow = this.pool.size - MAX_POOL_ITEMS;
+      const oldest = [...this.pool.entries()]
+        .sort(([, a], [, b]) => (a.publishedAt ?? 0) - (b.publishedAt ?? 0))
+        .slice(0, overflow);
+      for (const [id] of oldest) {
+        this.pool.delete(id);
+        this.spokenIds.delete(id);
+      }
+    }
+
+    for (const id of this.spokenIds) {
+      if (!this.pool.has(id)) this.spokenIds.delete(id);
+    }
+    while (this.spokenIds.size > MAX_SPOKEN_IDS) {
+      const oldestSpoken = this.spokenIds.values().next().value;
+      if (!oldestSpoken) break;
+      this.spokenIds.delete(oldestSpoken);
+    }
   }
 }

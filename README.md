@@ -6,21 +6,52 @@ thoughts — slide in from the edges as floating cards. Dino's job is to walk
 over, grab each one, and drag it down to the matching category bin at the
 bottom of the page.
 
-Built with **Vite + TypeScript**, no images, no API keys, no backend.
+Built with **Vite + TypeScript**, no images and no API keys. Production runs as
+two small services:
+
+- `dinosaurus-frontend`: the static Vite app served by `static-server.mjs`.
+- `dinosaurus-archive`: an in-memory 2-hour shared archive plus server-sent
+  events, served from `server/server.mjs`.
 
 ## Quick start
 
 ```bash
-npm install
-npm run dev      # http://localhost:5173
+pnpm install
+pnpm dev      # http://localhost:5173
 ```
 
 Build a static bundle:
 
 ```bash
-npm run build    # outputs to ./dist
-npm run preview  # serve ./dist locally
+pnpm build    # outputs to ./dist
+pnpm preview  # serve ./dist locally
 ```
+
+Run the archive service locally in another terminal:
+
+```bash
+cd server
+pnpm install
+pnpm start     # http://localhost:8080
+```
+
+## Configuration
+
+Frontend build-time variable:
+
+- `VITE_ARCHIVE_URL`: public base URL for the archive service. In production
+  this is `https://dinosaurus-archive-production.up.railway.app`.
+
+Archive runtime variables:
+
+- `PORT`: HTTP port. Railway sets this automatically.
+- `ALLOWED_ORIGINS`: comma-separated browser origins allowed to call
+  `/archive` and `/events`, for example
+  `https://dino.zaur.app,http://localhost:5173,http://localhost:5174,http://localhost:4173`.
+
+The frontend reads `VITE_ARCHIVE_URL` at build time, so changing it requires a
+new frontend build/deploy. If archive sync fails, the app keeps working locally
+and logs a one-time browser console warning pointing at these variables.
 
 ## What's inside
 
@@ -31,20 +62,22 @@ src/
 ├── dino.ts            # dino entity + tiny state machine (wander/seek/carry/deliver)
 ├── sprite.ts          # programmatic pixel-art frames (no image files)
 ├── messages.ts        # floating message cards + category bins (DOM overlay)
-├── narrator.ts        # picks what dino should hear about & when
+├── weather.ts         # per-visitor weather card + ambient sky state
 └── services/
-    ├── content.ts     # ContentSource interface
-    ├── news.ts        # Hacker News top stories
-    ├── weather.ts     # Open-Meteo current + tomorrow
-    └── musings.ts     # offline fallback thoughts
+    └── content.ts     # shared ContentItem types
+
+server/
+├── server.mjs         # archive API, SSE, CORS, health check
+├── narrator.mjs       # server-side source scheduler and item picker
+└── sources/           # HN, DEV.to, quakes, history, facts, musings
 ```
 
 ## How a message gets sorted
 
-1. Each `ContentSource` produces scored items on its own refresh schedule.
-2. The `Narrator` keeps a deduped pool, ranks them (score + recency + a
+1. Each server-side source produces scored items on its own refresh schedule.
+2. The archive `Narrator` keeps a deduped pool, ranks them (score + recency + a
    diversity penalty so the same kind doesn't dominate), and emits one item
-   at a time.
+   at a time over SSE.
 3. The new item spawns as a card that **slides in from the left, right, or
    top** and gently bobs in the air.
 4. The courier loop in `main.ts` looks at all floating cards, picks the one
@@ -57,28 +90,26 @@ src/
 While he has nothing to deliver, dino does his usual thing: walking,
 looking up, blinking, occasionally napping.
 
-## Adding a new content source
+## Adding a new shared content source
 
-Implement `ContentSource` and register it in `main.ts`:
+Add a source module under `server/sources/` and register it in `server/server.mjs`:
 
-```ts
-class MarsWeatherSource implements ContentSource {
-  readonly name = "mars-weather";
-  readonly refreshEveryMs = 30 * 60_000;
-  async fetchItems(signal: AbortSignal): Promise<ContentItem[]> {
-    // …fetch + map to { id, kind, text, href?, publishedAt, score }
-  }
-}
-
-narrator.registerSource(new MarsWeatherSource());
+```js
+export const MarsWeather = {
+  name: "mars-weather",
+  refreshEveryMs: 30 * 60_000,
+  async fetchItems(signal) {
+    // fetch + map to { id, kind, text, href?, publishedAt, score }
+  },
+};
 ```
 
-If you introduce a new `ContentKind`, also add a bin for it in `main.ts`:
+If you introduce a new `ContentKind`, also add it to `src/services/content.ts`,
+`server/server.mjs`'s `ALLOWED_KINDS`, and the bin list in `src/main.ts`:
 
 ```ts
 const messages = new MessageWorld(stage, [
   { kind: "news",    label: "news",     icon: "▤" },
-  { kind: "weather", label: "weather",  icon: "☁" },
   { kind: "thought", label: "thoughts", icon: "✦" },
   { kind: "fact",    label: "facts",    icon: "❍" },
 ], cssW, cssH);
