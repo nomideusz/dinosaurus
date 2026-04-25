@@ -79,6 +79,12 @@ export interface MessageWorldOptions {
   maxConcurrent?: number;
   /** Bottom padding (px) reserved for the bins row. */
   binsAreaHeight?: number;
+  /**
+   * Called whenever spawn() actually creates a new floating card. Used by
+   * main.ts to trigger the dino's "surprised" double-take. Not called for
+   * dedup rejections, capacity rejections, or unknown kinds.
+   */
+  onSpawn?: (item: ContentItem) => void;
 }
 
 /**
@@ -107,6 +113,7 @@ export class MessageWorld {
   private readonly binsAreaHeight: number;
   private archiveOverlay: ArchiveOverlay | null = null;
   private nextRefreshAt = 0;
+  private readonly onSpawn?: (item: ContentItem) => void;
 
   constructor(
     parent: HTMLElement,
@@ -116,6 +123,7 @@ export class MessageWorld {
     opts: MessageWorldOptions = {}
   ) {
     this.stage = parent;
+    this.onSpawn = opts.onSpawn;
     this.worldW = worldW;
     this.worldH = worldH;
     this.maxConcurrent = opts.maxConcurrent ?? 6;
@@ -305,6 +313,7 @@ export class MessageWorld {
     requestAnimationFrame(() => el.classList.add("msg--visible"));
     this.applyTransform(msg);
 
+    this.onSpawn?.(item);
     return msg;
   }
 
@@ -506,6 +515,11 @@ export class MessageWorld {
           this.applyExpiredIds(obj.ids.filter((x): x is string => typeof x === "string"));
         }
         return;
+      case "item": {
+        const item = sanitizeContentItem(obj.item);
+        if (item) this.spawn(item);
+        return;
+      }
       default:
         // Pre-typed-event fallback (older server) — treat as raw snapshot.
         if (obj.bins) this.applySnapshot(obj.bins);
@@ -759,6 +773,30 @@ function bumpBin(bin: CategoryBin): void {
   // Force reflow so the keyframes restart from the top.
   void bin.el.offsetWidth;
   bin.el.classList.add("bin--bump");
+}
+
+/** Validate a single ContentItem-shaped value (from a server "item" event). */
+function sanitizeContentItem(raw: unknown): ContentItem | null {
+  if (!raw || typeof raw !== "object") return null;
+  const item = raw as Partial<ContentItem>;
+  if (
+    typeof item.id !== "string" ||
+    typeof item.kind !== "string" ||
+    typeof item.text !== "string" ||
+    typeof item.publishedAt !== "number" ||
+    typeof item.score !== "number"
+  ) {
+    return null;
+  }
+  return {
+    id: item.id,
+    kind: item.kind as ContentKind,
+    text: item.text,
+    href: typeof item.href === "string" ? item.href : undefined,
+    linkLabel: typeof item.linkLabel === "string" ? item.linkLabel : undefined,
+    publishedAt: item.publishedAt,
+    score: item.score,
+  };
 }
 
 /** Validate a single DeliveredItem-shaped value; returns null on bad shape. */

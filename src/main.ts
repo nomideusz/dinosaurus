@@ -1,22 +1,14 @@
 // Entry point. Sets up the canvas + DPR scaling, builds the world and the
-// dino, plugs in content sources, and runs the main animation loop.
+// dino, and runs the main animation loop.
 //
-// The page is intentionally bare: a canvas with the dino on it and a row of
-// category bins along the bottom. Content slides in from the edges as
-// floating cards; the dino walks over, picks one up, and drops it into the
-// matching bin.
+// Content (HN, DEV.to, weather, quakes, history, facts, musings) is fetched
+// and ranked on the server. The client just listens for "item" SSE events
+// and spawns a floating card for each; the courier loop then walks the dino
+// over to grab and deliver them.
 
 import { Dino, type Mood } from "./dino.js";
 import { MessageWorld, type FloatingMessage } from "./messages.js";
-import { Narrator } from "./narrator.js";
 import type { ContentKind } from "./services/content.js";
-import { DevToSource } from "./services/devto.js";
-import { FactsSource } from "./services/facts.js";
-import { HistorySource } from "./services/history.js";
-import { HackerNewsSource } from "./services/news.js";
-import { MusingsSource } from "./services/musings.js";
-import { QuakesSource } from "./services/quakes.js";
-import { WeatherSource } from "./services/weather.js";
 import { World } from "./world.js";
 
 function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
@@ -47,8 +39,7 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
   const dinoScale = Math.max(2, Math.min(4, Math.round(Math.min(cssW, cssH) / 240)));
   const dino = new Dino({ scale: dinoScale, worldWidth: cssW, worldHeight: cssH });
 
-  // The bins we start with — one per kind that any of our content sources
-  // produce. Adding a new kind is a one-liner here.
+  // The bins we start with — one per kind that the server's narrator emits.
   const messages = new MessageWorld(
     stage,
     [
@@ -60,7 +51,12 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
       { kind: "thought", label: "thoughts", icon: "✦" },
     ],
     cssW,
-    cssH
+    cssH,
+    {
+      // Brief double-take whenever a fresh card lands. Goal-driven states
+      // (seek/carry/deliver) ignore this, so we never disturb a delivery.
+      onSpawn: () => dino.react("surprised", 500),
+    }
   );
 
   const courier = new Courier(dino, messages);
@@ -76,27 +72,6 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
       courier.cancel();
     });
   });
-
-  // Content + narrator. New items just get spawned as floating cards — the
-  // courier loop takes it from there.
-  const narrator = new Narrator({
-    cadenceMs: 9_000,
-    onItem: (item) => {
-      const spawned = messages.spawn(item) !== null;
-      // Brief double-take when something new floats in. Goal-driven states
-      // (seek/carry/deliver) ignore this, so we don't disturb a delivery.
-      if (spawned) dino.react("surprised", 500);
-      return spawned;
-    },
-  });
-  narrator.registerSource(new HackerNewsSource());
-  narrator.registerSource(new DevToSource());
-  narrator.registerSource(new WeatherSource());
-  narrator.registerSource(new QuakesSource());
-  narrator.registerSource(new HistorySource());
-  narrator.registerSource(new FactsSource());
-  narrator.registerSource(new MusingsSource());
-  narrator.start();
 
   // Main loop
   let last = performance.now();

@@ -1,8 +1,5 @@
-// Tiny offline source: random thoughts the dino has between real news.
-// Keeps the experience alive on flaky networks and makes the character feel
-// like more than a news ticker.
-
-import type { ContentItem, ContentSource } from "./content.js";
+// Static "thought" pool. The dino's own internal monologue — keeps the page
+// alive when external sources are flaky and gives him a distinct voice.
 
 const MUSINGS = [
   "the grass tastes especially crunchy today.",
@@ -24,19 +21,17 @@ const MUSINGS = [
   "*sniff sniff* — smells like adventure.",
 ];
 
-export class MusingsSource implements ContentSource {
-  readonly name = "musings";
-  readonly refreshEveryMs = 30 * 60_000;
-
-  async fetchItems(): Promise<ContentItem[]> {
+export const Musings = {
+  name: "musings",
+  refreshEveryMs: 30 * 60_000,
+  async fetchItems() {
     const now = Date.now();
     return MUSINGS.map((text, i) => ({
       id: `mus:${i}`,
-      kind: "thought" as const,
+      kind: "thought",
       text,
       publishedAt: now,
-      // intentionally low so real news outranks musings when available
       score: 0.18 + Math.random() * 0.05,
     }));
-  }
-}
+  },
+};

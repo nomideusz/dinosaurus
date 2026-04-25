@@ -9,6 +9,15 @@
 
 import { createServer } from "node:http";
 
+import { Narrator } from "./narrator.mjs";
+import { DevTo } from "./sources/devto.mjs";
+import { Facts } from "./sources/facts.mjs";
+import { HackerNews } from "./sources/hn.mjs";
+import { History } from "./sources/history.mjs";
+import { Musings } from "./sources/musings.mjs";
+import { Quakes } from "./sources/quakes.mjs";
+import { Weather } from "./sources/weather.mjs";
+
 const PORT = Number(process.env.PORT ?? 8080);
 const ARCHIVE_TTL_MS = 2 * 60 * 60 * 1000;
 /** Hard cap per kind so a misbehaving client can't blow up memory. */
@@ -219,3 +228,28 @@ const server = createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`[archive] listening on :${PORT} (TTL ${ARCHIVE_TTL_MS}ms)`);
 });
+
+// One narrator for everyone. Each client used to poll HN/DEV.to/USGS/etc.
+// independently; now the server polls once and pushes new items as they're
+// chosen, so upstream APIs see ~1 set of requests instead of N.
+const narrator = new Narrator({
+  cadenceMs: 9_000,
+  isAlreadyKnown: (id) => {
+    for (const list of bins.values()) {
+      for (const it of list) if (it.id === id) return true;
+    }
+    return false;
+  },
+  onItem: (item) => {
+    broadcastEvent({ type: "item", item });
+  },
+  logger: console,
+});
+narrator.registerSource(HackerNews);
+narrator.registerSource(DevTo);
+narrator.registerSource(Weather);
+narrator.registerSource(Quakes);
+narrator.registerSource(History);
+narrator.registerSource(Facts);
+narrator.registerSource(Musings);
+narrator.start();
