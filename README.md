@@ -55,6 +55,17 @@ with WebSocket and falls back to archive polling/SSE compatibility when needed.
 If archive sync fails, the app keeps working locally and logs a one-time browser
 console warning pointing at these variables.
 
+## Dino radio
+
+Phase 1 is a minimal control strip, not an audio player. The user can pick a
+channel (`all`, `news`, `quakes`, `history`, `facts`, `thoughts`) and a pace
+(`chill`, `normal`, `busy`). Preferences are anonymous, saved in
+`localStorage`, and sent to `/realtime` for the current socket only.
+
+The server filters active cards per client preference; the client also keeps a
+small local queue and spaces card spawns based on the selected pace. Future
+audio can build on the same channel state after a user gesture enables sound.
+
 ## What's inside
 
 ```

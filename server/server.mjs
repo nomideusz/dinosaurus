@@ -33,6 +33,8 @@ const ALLOWED_KINDS = new Set([
   "quake",
   "history",
 ]);
+const DEFAULT_CHANNELS = ["news", "fact", "thought", "quake", "history"];
+const PACES = new Set(["chill", "normal", "busy"]);
 
 /**
  * Origins allowed to call /archive and /events. Configurable via env var so
@@ -62,7 +64,7 @@ const activeItems = new Map();
 /** @type {Set<{ res: import("node:http").ServerResponse, hb: NodeJS.Timeout }>} */
 const sseClients = new Set();
 
-/** @type {Set<{ id: string, socket: import("node:net").Socket, buffer: Buffer }>} */
+/** @type {Set<{ id: string, socket: import("node:net").Socket, buffer: Buffer, preferences: { channels: string[], pace: string } }>} */
 const wsClients = new Set();
 
 function totalCount() {
@@ -91,6 +93,30 @@ function snapshot() {
 function publicActiveItem(item) {
   const { claimedBy, claimUntil, ...rest } = item;
   return rest;
+}
+
+function defaultPreferences() {
+  return { channels: DEFAULT_CHANNELS.slice(), pace: "normal" };
+}
+
+function normalizePreferences(raw, previous = defaultPreferences()) {
+  if (!raw || typeof raw !== "object") return previous;
+  const channels = Array.isArray(raw.channels)
+    ? raw.channels.filter((kind) => DEFAULT_CHANNELS.includes(kind))
+    : previous.channels;
+  const pace = typeof raw.pace === "string" && PACES.has(raw.pace) ? raw.pace : previous.pace;
+  return {
+    channels: channels.length > 0 ? [...new Set(channels)] : previous.channels,
+    pace,
+  };
+}
+
+function itemMatchesClient(client, item) {
+  return client.preferences.channels.includes(item.kind);
+}
+
+function activeForClient(client) {
+  return [...activeItems.values()].filter((item) => itemMatchesClient(client, item)).map(publicActiveItem);
 }
 
 function isKnown(id) {
@@ -142,6 +168,12 @@ function sendRealtime(client, event) {
 
 function broadcastRealtime(event) {
   for (const client of wsClients) sendRealtime(client, event);
+}
+
+function broadcastRealtimeForItem(event, item) {
+  for (const client of wsClients) {
+    if (itemMatchesClient(client, item)) sendRealtime(client, event);
+  }
 }
 
 function encodeWsText(text) {
@@ -235,7 +267,7 @@ setInterval(() => {
     if (item.claimUntil && item.claimUntil <= now) {
       delete item.claimedBy;
       delete item.claimUntil;
-      broadcastRealtime({ type: "item_released", id, item: publicActiveItem(item) });
+      broadcastRealtimeForItem({ type: "item_released", id, item: publicActiveItem(item) }, item);
     }
     if (now - item.spawnedAt >= ACTIVE_ITEM_TTL_MS) {
       activeItems.delete(id);
@@ -405,14 +437,19 @@ server.on("upgrade", (req, socket, head) => {
       ].join("\r\n")
     );
 
-    const client = { id: randomUUID(), socket, buffer: Buffer.from(head ?? []) };
+    const client = {
+      id: randomUUID(),
+      socket,
+      buffer: Buffer.from(head ?? []),
+      preferences: defaultPreferences(),
+    };
     wsClients.add(client);
     sendRealtime(client, { type: "hello", clientId: client.id });
     const snap = snapshot();
     sendRealtime(client, {
       type: "snapshot",
       bins: snap.bins,
-      active: snap.active,
+      active: activeForClient(client),
       ttlMs: snap.ttlMs,
     });
     if (client.buffer.length > 0) {
@@ -436,7 +473,7 @@ function removeRealtimeClient(client) {
     if (item.claimedBy === client.id) {
       delete item.claimedBy;
       delete item.claimUntil;
-      broadcastRealtime({ type: "item_released", id: item.id, item: publicActiveItem(item) });
+      broadcastRealtimeForItem({ type: "item_released", id: item.id, item: publicActiveItem(item) }, item);
     }
   }
 }
@@ -452,9 +489,27 @@ function handleRealtimeMessage(client, raw) {
   if (!msg || typeof msg !== "object") return;
   switch (msg.type) {
     case "hello":
+      client.preferences = normalizePreferences(msg.preferences, client.preferences);
       sendRealtime(client, {
         type: "snapshot",
-        ...snapshot(),
+        bins: snapshot().bins,
+        active: activeForClient(client),
+        ttlMs: ARCHIVE_TTL_MS,
+      });
+      return;
+    case "set_preferences":
+      client.preferences = normalizePreferences(msg.preferences, client.preferences);
+      for (const item of activeItems.values()) {
+        if (item.claimedBy === client.id && !itemMatchesClient(client, item)) {
+          delete item.claimedBy;
+          delete item.claimUntil;
+          broadcastRealtimeForItem({ type: "item_released", id: item.id, item: publicActiveItem(item) }, item);
+        }
+      }
+      sendRealtime(client, {
+        type: "preferences_updated",
+        preferences: client.preferences,
+        active: activeForClient(client),
       });
       return;
     case "claim":
@@ -493,7 +548,7 @@ function handleRelease(client, id) {
   if (!item || item.claimedBy !== client.id) return;
   delete item.claimedBy;
   delete item.claimUntil;
-      broadcastRealtime({ type: "item_released", id, item: publicActiveItem(item) });
+  broadcastRealtimeForItem({ type: "item_released", id, item: publicActiveItem(item) }, item);
 }
 
 function handleDeliver(client, id) {
@@ -531,7 +586,7 @@ const narrator = new Narrator({
     if (isKnown(item.id)) return;
     activeItems.set(item.id, { ...item, spawnedAt: Date.now() });
     broadcastEvent({ type: "item", item });
-    broadcastRealtime({ type: "item_spawned", item });
+    broadcastRealtimeForItem({ type: "item_spawned", item }, item);
   },
   logger: console,
 });

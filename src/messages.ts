@@ -99,6 +99,14 @@ const ARCHIVE_TTL_MS = 2 * 60 * 60 * 1000;
 /** How often the client polls the server for items others have sorted. */
 const ARCHIVE_REFRESH_INTERVAL_MS = 60_000;
 const CARD_SPAWN_GAP_MS = 2_500;
+const RADIO_STORAGE_KEY = "dinosaurus.radio.v1";
+const RADIO_CHANNELS = ["news", "quake", "history", "fact", "thought"] as const;
+type RadioChannel = "all" | (typeof RADIO_CHANNELS)[number];
+type RadioPace = "chill" | "normal" | "busy";
+interface RadioPreferences {
+  channel: RadioChannel;
+  pace: RadioPace;
+}
 const ARCHIVE_API_URL =
   (import.meta.env.VITE_ARCHIVE_URL ?? "https://dinosaurus-archive-production.up.railway.app").replace(/\/$/, "");
 
@@ -121,6 +129,7 @@ export class MessageWorld {
   private realtimeConnected = false;
   private clientId: string | null = null;
   private readonly pendingItems = new Map<string, ContentItem>();
+  private radioPrefs = loadRadioPreferences();
 
   constructor(
     parent: HTMLElement,
@@ -145,6 +154,8 @@ export class MessageWorld {
     this.binLayer = document.createElement("div");
     this.binLayer.className = "bin-row";
     parent.appendChild(this.binLayer);
+
+    this.createRadioControls();
 
     for (const def of binDefs) {
       const el = document.createElement("button");
@@ -499,7 +510,7 @@ export class MessageWorld {
       this.realtime = ws;
       ws.addEventListener("open", () => {
         this.realtimeConnected = true;
-        this.sendRealtime({ type: "hello" });
+        this.sendRealtime({ type: "hello", preferences: this.realtimePreferences() });
       });
       ws.addEventListener("message", (ev) => {
         if (typeof ev.data === "string") this.dispatchServerEvent(ev.data);
@@ -523,6 +534,73 @@ export class MessageWorld {
       return;
     }
     this.realtime.send(JSON.stringify(data));
+  }
+
+  private realtimePreferences(): { channels: ContentKind[]; pace: RadioPace } {
+    return {
+      channels:
+        this.radioPrefs.channel === "all"
+          ? [...RADIO_CHANNELS]
+          : [this.radioPrefs.channel],
+      pace: this.radioPrefs.pace,
+    };
+  }
+
+  private createRadioControls(): void {
+    const controls = document.createElement("div");
+    controls.className = "radio-controls";
+    controls.innerHTML = `
+      <label class="radio-control">
+        <span>radio</span>
+        <select class="radio-channel" aria-label="Dino radio channel">
+          <option value="all">all</option>
+          <option value="news">news</option>
+          <option value="quake">quakes</option>
+          <option value="history">history</option>
+          <option value="fact">facts</option>
+          <option value="thought">thoughts</option>
+        </select>
+      </label>
+      <label class="radio-control">
+        <span>pace</span>
+        <select class="radio-pace" aria-label="Dino radio pace">
+          <option value="chill">chill</option>
+          <option value="normal">normal</option>
+          <option value="busy">busy</option>
+        </select>
+      </label>
+    `;
+    const channel = controls.querySelector<HTMLSelectElement>(".radio-channel")!;
+    const pace = controls.querySelector<HTMLSelectElement>(".radio-pace")!;
+    channel.value = this.radioPrefs.channel;
+    pace.value = this.radioPrefs.pace;
+    const update = () => {
+      this.setRadioPreferences({
+        channel: sanitizeRadioChannel(channel.value),
+        pace: sanitizeRadioPace(pace.value),
+      });
+    };
+    channel.addEventListener("change", update);
+    pace.addEventListener("change", update);
+    this.stage.appendChild(controls);
+  }
+
+  private setRadioPreferences(next: RadioPreferences): void {
+    this.radioPrefs = next;
+    saveRadioPreferences(next);
+    for (const [id, item] of this.pendingItems) {
+      if (!this.matchesRadio(item)) this.pendingItems.delete(id);
+    }
+    for (const msg of [...this.messages.values()]) {
+      if (!this.matchesRadio(msg)) {
+        if (msg.state === "claimed" || msg.state === "carried") {
+          this.sendRealtime({ type: "release", id: msg.id });
+        }
+        this.cullActiveItem(msg.id);
+      }
+    }
+    this.nextSpawnAt = performance.now() + spawnGapForPace(next.pace);
+    this.sendRealtime({ type: "set_preferences", preferences: this.realtimePreferences() });
   }
 
   /**
@@ -554,6 +632,7 @@ export class MessageWorld {
       clientId?: unknown;
       bins?: unknown;
       active?: unknown;
+      preferences?: unknown;
       item?: unknown;
       id?: unknown;
       ids?: unknown;
@@ -562,6 +641,9 @@ export class MessageWorld {
     switch (obj.type) {
       case "hello":
         if (typeof obj.clientId === "string") this.clientId = obj.clientId;
+        return;
+      case "preferences_updated":
+        this.applyActiveItems(obj.active);
         return;
       case "snapshot":
         this.applySnapshot(obj.bins);
@@ -648,6 +730,7 @@ export class MessageWorld {
     const item = sanitizeContentItem(raw);
     if (!item) return;
     if (!this.binFor(item.kind)) return;
+    if (!this.matchesRadio(item)) return;
     if (this.messages.has(item.id) || this.pendingItems.has(item.id) || this.isInArchive(item.id)) {
       return;
     }
@@ -670,10 +753,14 @@ export class MessageWorld {
       const spawned = this.spawn(item);
       if (spawned) {
         this.pendingItems.delete(id);
-        this.nextSpawnAt = now + CARD_SPAWN_GAP_MS;
+        this.nextSpawnAt = now + spawnGapForPace(this.radioPrefs.pace);
       }
       return;
     }
+  }
+
+  private matchesRadio(item: { kind: ContentKind }): boolean {
+    return this.radioPrefs.channel === "all" || item.kind === this.radioPrefs.channel;
   }
 
   private cullActiveItem(id: string): void {
@@ -1003,6 +1090,49 @@ function wsBaseUrl(httpBase: string): string {
   return url.toString().replace(/\/$/, "");
 }
 
+function loadRadioPreferences(): RadioPreferences {
+  try {
+    const raw = window.localStorage.getItem(RADIO_STORAGE_KEY);
+    if (!raw) return { channel: "all", pace: "normal" };
+    const parsed = JSON.parse(raw) as Partial<RadioPreferences>;
+    return {
+      channel: sanitizeRadioChannel(parsed.channel),
+      pace: sanitizeRadioPace(parsed.pace),
+    };
+  } catch {
+    return { channel: "all", pace: "normal" };
+  }
+}
+
+function saveRadioPreferences(prefs: RadioPreferences): void {
+  try {
+    window.localStorage.setItem(RADIO_STORAGE_KEY, JSON.stringify(prefs));
+  } catch {
+    // Preferences are nice-to-have; private browsing/storage failures are fine.
+  }
+}
+
+function sanitizeRadioChannel(value: unknown): RadioChannel {
+  return value === "all" || RADIO_CHANNELS.includes(value as (typeof RADIO_CHANNELS)[number])
+    ? (value as RadioChannel)
+    : "all";
+}
+
+function sanitizeRadioPace(value: unknown): RadioPace {
+  return value === "chill" || value === "busy" || value === "normal" ? value : "normal";
+}
+
+function spawnGapForPace(pace: RadioPace): number {
+  switch (pace) {
+    case "chill":
+      return CARD_SPAWN_GAP_MS * 2;
+    case "busy":
+      return Math.round(CARD_SPAWN_GAP_MS * 0.5);
+    case "normal":
+      return CARD_SPAWN_GAP_MS;
+  }
+}
+
 let stylesInjected = false;
 function injectStylesOnce(): void {
   if (stylesInjected) return;
@@ -1084,6 +1214,38 @@ function injectStylesOnce(): void {
     .msg--thought { border-left-width: 4px; border-left-color: #c8a8ff; }
     .msg--quake   { border-left-width: 4px; border-left-color: #f3c969; }
     .msg--history { border-left-width: 4px; border-left-color: #d4a574; }
+
+    .radio-controls {
+      position: absolute;
+      left: 12px;
+      top: 12px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 6px 8px;
+      background: var(--paper, #1f1e26);
+      color: var(--ink, #e8e4d8);
+      border: 1px solid var(--ink-soft, #8a8678);
+      border-radius: 2px;
+      font: 600 10px/1.2 ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      z-index: 5;
+    }
+    .radio-control {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .radio-control select {
+      background: var(--bg, #14141a);
+      color: var(--ink, #e8e4d8);
+      border: 1px solid var(--ink-soft, #8a8678);
+      border-radius: 1px;
+      font: inherit;
+      letter-spacing: 0;
+      text-transform: none;
+    }
 
     .bin-row {
       position: absolute;
