@@ -163,6 +163,9 @@ export class MessageWorld {
       this.bins.push(bin);
     }
 
+    this.connectEventStream();
+    // SSE delivers an initial snapshot — pullArchive() is a fallback for the
+    // first paint in case EventSource is blocked / the network is flaky.
     void this.pullArchive();
     this.relayoutBins();
   }
@@ -380,10 +383,7 @@ export class MessageWorld {
     bin.countEl.textContent = String(bin.count);
     if (this.archiveOverlay) this.archiveOverlay.refreshIfShowing(bin);
     void this.pushDelivery(newItem);
-    bin.el.classList.remove("bin--bump");
-    // Force reflow so the animation can replay.
-    void bin.el.offsetWidth;
-    bin.el.classList.add("bin--bump");
+    bumpBin(bin);
     return true;
   }
 
@@ -465,6 +465,29 @@ export class MessageWorld {
     }
   }
 
+  /**
+   * Subscribe to server-sent events so this client sees other visitors'
+   * deliveries instantly instead of waiting for the next 60s poll. The
+   * browser auto-reconnects on transient drops; on persistent failure the
+   * periodic pullArchive() in update() keeps us current.
+   */
+  private connectEventStream(): void {
+    if (!ARCHIVE_API_URL || typeof EventSource === "undefined") return;
+    try {
+      const es = new EventSource(`${ARCHIVE_API_URL}/events`);
+      es.onmessage = (ev) => {
+        try {
+          const data = JSON.parse(ev.data);
+          this.applySnapshot(data?.bins);
+        } catch {
+          // Malformed event — ignore and wait for the next one.
+        }
+      };
+    } catch {
+      // EventSource construction blocked (e.g. CSP) — fall back to polling.
+    }
+  }
+
   private async pushDelivery(item: DeliveredItem): Promise<void> {
     if (!ARCHIVE_API_URL) return;
     try {
@@ -492,12 +515,14 @@ export class MessageWorld {
     if (!cleaned) return;
     for (const bin of this.bins) {
       const list = cleaned[bin.kind] ?? [];
+      const before = bin.count;
       // Trust the server's ordering (newest first), but still prune in case
       // the client clock disagrees enough to keep something past the TTL.
       bin.delivered = list.slice();
       pruneExpired(bin);
       bin.count = bin.delivered.length;
       bin.countEl.textContent = String(bin.count);
+      if (bin.count > before) bumpBin(bin);
       if (this.archiveOverlay) this.archiveOverlay.refreshIfShowing(bin);
     }
     // If a refresh reveals that something currently floating is already in
@@ -657,6 +682,14 @@ function formatRelative(ms: number): string {
 function pruneExpired(bin: CategoryBin): void {
   const cutoff = Date.now() - ARCHIVE_TTL_MS;
   bin.delivered = bin.delivered.filter((d) => d.deliveredAt >= cutoff);
+}
+
+/** Replay the bin's bump animation. */
+function bumpBin(bin: CategoryBin): void {
+  bin.el.classList.remove("bin--bump");
+  // Force reflow so the keyframes restart from the top.
+  void bin.el.offsetWidth;
+  bin.el.classList.add("bin--bump");
 }
 
 /**

@@ -18,6 +18,15 @@ const ALLOWED_KINDS = new Set(["news", "weather", "fact", "thought"]);
 /** @type {Map<string, Array<{ id: string, kind: string, text: string, href?: string, linkLabel?: string, deliveredAt: number }>>} */
 const bins = new Map();
 
+/** @type {Set<{ res: import("node:http").ServerResponse, hb: NodeJS.Timeout }>} */
+const sseClients = new Set();
+
+function totalCount() {
+  let n = 0;
+  for (const list of bins.values()) n += list.length;
+  return n;
+}
+
 function prune() {
   const cutoff = Date.now() - ARCHIVE_TTL_MS;
   for (const [kind, list] of bins) {
@@ -34,6 +43,26 @@ function snapshot() {
   for (const [kind, list] of bins) out[kind] = list;
   return { bins: out, ttlMs: ARCHIVE_TTL_MS };
 }
+
+function broadcast(snap = snapshot()) {
+  if (sseClients.size === 0) return;
+  const payload = `data: ${JSON.stringify(snap)}\n\n`;
+  for (const client of sseClients) {
+    try {
+      client.res.write(payload);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
+
+// Drain expired items so connected clients see them disappear in real time
+// without waiting for the next read.
+setInterval(() => {
+  const before = totalCount();
+  prune();
+  if (totalCount() !== before) broadcast();
+}, 60_000).unref();
 
 function setCors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -93,6 +122,34 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/events") {
+      setCors(res);
+      res.writeHead(200, {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache, no-transform",
+        connection: "keep-alive",
+        // Hint to nginx/edge proxies not to buffer; harmless elsewhere.
+        "x-accel-buffering": "no",
+      });
+      // Send the current snapshot immediately so the client doesn't have to
+      // race a separate /archive request.
+      res.write(`data: ${JSON.stringify(snapshot())}\n\n`);
+      const hb = setInterval(() => {
+        try {
+          res.write(`: ping\n\n`);
+        } catch {
+          /* socket gone — handled by close listener */
+        }
+      }, 25_000);
+      const client = { res, hb };
+      sseClients.add(client);
+      req.on("close", () => {
+        clearInterval(hb);
+        sseClients.delete(client);
+      });
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/archive") {
       let body;
       try {
@@ -112,7 +169,9 @@ const server = createServer(async (req, res) => {
       filtered.unshift(item);
       if (filtered.length > MAX_PER_KIND) filtered.length = MAX_PER_KIND;
       bins.set(item.kind, filtered);
-      sendJson(res, 200, snapshot());
+      const snap = snapshot();
+      sendJson(res, 200, snap);
+      broadcast(snap);
       return;
     }
 
