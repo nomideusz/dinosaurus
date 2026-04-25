@@ -1303,15 +1303,15 @@ class RadioAudio {
   }
 
   private startMusic(channel: RadioChannel): void {
-    if (!this.ctx || !this.master || this.musicEnabled) return;
+    if (!this.ctx || this.musicEnabled) return;
     this.musicChannel = channel;
     const gain = this.ctx.createGain();
-    gain.gain.value = 0.035;
-    gain.connect(this.master);
+    gain.gain.value = 0.08;
+    gain.connect(this.ctx.destination);
     this.musicGain = gain;
     this.musicEnabled = true;
     this.musicStep = 0;
-    this.musicTimer = window.setInterval(() => this.playMusicStep(), 320);
+    this.musicTimer = window.setInterval(() => this.playMusicStep(), 280);
     this.playMusicStep();
   }
 
@@ -1368,7 +1368,7 @@ class RadioAudio {
     osc.type = type;
     osc.frequency.value = freq;
     gain.gain.setValueAtTime(0.0001, startAt);
-    gain.gain.exponentialRampToValueAtTime(0.08 * level, startAt + 0.025);
+    gain.gain.exponentialRampToValueAtTime(0.18 * level, startAt + 0.025);
     gain.gain.exponentialRampToValueAtTime(0.0001, startAt + duration);
     osc.connect(gain).connect(this.musicGain);
     osc.start(startAt);
