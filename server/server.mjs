@@ -25,6 +25,7 @@ const MAX_PER_KIND = 200;
 const ACTIVE_ITEM_TTL_MS = 5 * 60_000;
 const CLAIM_LEASE_MS = 45_000;
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+let activeSequence = 0;
 const ALLOWED_KINDS = new Set([
   "news",
   "weather",
@@ -91,7 +92,7 @@ function snapshot() {
 }
 
 function publicActiveItem(item) {
-  const { claimedBy, claimUntil, ...rest } = item;
+  const { claimedBy, claimUntil, sourceId, ...rest } = item;
   return rest;
 }
 
@@ -120,11 +121,20 @@ function activeForClient(client) {
 }
 
 function isKnown(id) {
-  if (activeItems.has(id)) return true;
-  for (const list of bins.values()) {
-    for (const it of list) if (it.id === id) return true;
+  for (const item of activeItems.values()) {
+    if ((item.sourceId ?? item.id) === id) return true;
   }
   return false;
+}
+
+function activeItemFromSource(item) {
+  activeSequence = (activeSequence + 1) % Number.MAX_SAFE_INTEGER;
+  return {
+    ...item,
+    sourceId: item.id,
+    id: `${item.id}:run:${Date.now().toString(36)}:${activeSequence.toString(36)}`,
+    spawnedAt: Date.now(),
+  };
 }
 
 function addDeliveredItem(item) {
@@ -584,9 +594,10 @@ const narrator = new Narrator({
   isAlreadyKnown: isKnown,
   onItem: (item) => {
     if (isKnown(item.id)) return;
-    activeItems.set(item.id, { ...item, spawnedAt: Date.now() });
-    broadcastEvent({ type: "item", item });
-    broadcastRealtimeForItem({ type: "item_spawned", item }, item);
+    const active = activeItemFromSource(item);
+    activeItems.set(active.id, active);
+    broadcastEvent({ type: "item", item: active });
+    broadcastRealtimeForItem({ type: "item_spawned", item: active }, active);
   },
   logger: console,
 });

@@ -576,39 +576,20 @@ export class MessageWorld {
           <option value="thought">thoughts</option>
         </select>
       </label>
-      <label class="radio-control">
-        <span>pace</span>
-        <select class="radio-pace" aria-label="Dino radio pace">
-          <option value="chill">chill</option>
-          <option value="normal">normal</option>
-          <option value="busy">busy</option>
-        </select>
-      </label>
-      <button type="button" class="radio-sound" aria-pressed="false">sound off</button>
       <button type="button" class="radio-music" aria-pressed="false">music off</button>
       <span class="radio-status" aria-live="polite">tuned</span>
     `;
     const channel = controls.querySelector<HTMLSelectElement>(".radio-channel")!;
-    const pace = controls.querySelector<HTMLSelectElement>(".radio-pace")!;
-    const sound = controls.querySelector<HTMLButtonElement>(".radio-sound")!;
     const music = controls.querySelector<HTMLButtonElement>(".radio-music")!;
     this.radioStatusEl = controls.querySelector<HTMLSpanElement>(".radio-status");
     channel.value = this.radioPrefs.channel;
-    pace.value = this.radioPrefs.pace;
     const update = () => {
       this.setRadioPreferences({
         channel: sanitizeRadioChannel(channel.value),
-        pace: sanitizeRadioPace(pace.value),
+        pace: "normal",
       });
     };
     channel.addEventListener("change", update);
-    pace.addEventListener("change", update);
-    sound.addEventListener("click", async () => {
-      const enabled = await this.radioAudio.toggle(this.radioPrefs.channel);
-      sound.textContent = enabled ? "sound on" : "sound off";
-      sound.setAttribute("aria-pressed", String(enabled));
-      this.setRadioStatus(enabled ? "broadcasting" : "muted");
-    });
     music.addEventListener("click", async () => {
       const enabled = await this.radioAudio.toggleMusic(this.radioPrefs.channel);
       music.textContent = enabled ? "music on" : "music off";
@@ -1590,7 +1571,6 @@ function injectStylesOnce(): void {
       letter-spacing: 0;
       text-transform: none;
     }
-    .radio-sound,
     .radio-music {
       background: transparent;
       color: var(--ink, #e8e4d8);
@@ -1601,7 +1581,6 @@ function injectStylesOnce(): void {
       text-transform: none;
       cursor: pointer;
     }
-    .radio-sound[aria-pressed="true"],
     .radio-music[aria-pressed="true"] {
       background: var(--ink, #e8e4d8);
       color: var(--paper, #1f1e26);
