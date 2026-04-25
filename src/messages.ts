@@ -105,6 +105,9 @@ const ARCHIVE_REFRESH_INTERVAL_MS = 60_000;
 const CARD_SPAWN_GAP_MS = 2_500;
 const RADIO_STORAGE_KEY = "dinosaurus.radio.v1";
 const RADIO_CHANNELS = ["news", "quake", "history", "fact", "thought"] as const;
+const RADIO_TRACKS: Partial<Record<RadioChannel, string>> = {
+  all: "/audio/radio/Mungo%20Jerry%20-%20%27%27In%20The%20Summertime%27%27.mp3",
+};
 type RadioChannel = "all" | (typeof RADIO_CHANNELS)[number];
 type RadioPace = "chill" | "normal" | "busy";
 interface RadioPreferences {
@@ -1207,6 +1210,7 @@ class RadioAudio {
   private master: GainNode | null = null;
   private hum: OscillatorNode | null = null;
   private musicGain: GainNode | null = null;
+  private track: HTMLAudioElement | null = null;
   private staticTimer: number | null = null;
   private musicTimer: number | null = null;
   private musicStep = 0;
@@ -1228,6 +1232,8 @@ class RadioAudio {
       this.stopMusic();
       return false;
     }
+    const trackStarted = await this.startTrack(channel);
+    if (trackStarted) return true;
     await this.ensureStarted(channel);
     this.startMusic(channel);
     return this.musicEnabled;
@@ -1235,6 +1241,7 @@ class RadioAudio {
 
   tune(channel: RadioChannel): void {
     this.musicChannel = channel;
+    if (this.musicEnabled && this.track) void this.switchTrack(channel);
     if (!this.ctx) return;
     if (this.enabled && this.hum) {
       this.hum.frequency.setTargetAtTime(channelFrequency(channel), this.ctx.currentTime, 0.04);
@@ -1318,10 +1325,46 @@ class RadioAudio {
   private stopMusic(): void {
     if (this.musicTimer !== null) window.clearInterval(this.musicTimer);
     this.musicTimer = null;
+    if (this.track) {
+      this.track.pause();
+      this.track = null;
+    }
     this.musicGain?.disconnect();
     this.musicGain = null;
     this.musicEnabled = false;
     this.closeIfSilent();
+  }
+
+  private async startTrack(channel: RadioChannel): Promise<boolean> {
+    const src = trackForChannel(channel);
+    if (!src) return false;
+    const audio = new Audio(src);
+    audio.loop = true;
+    audio.volume = 0.42;
+    audio.preload = "auto";
+    try {
+      await audio.play();
+      this.track = audio;
+      this.musicEnabled = true;
+      this.musicChannel = channel;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async switchTrack(channel: RadioChannel): Promise<void> {
+    const src = trackForChannel(channel);
+    if (!src || !this.track) return;
+    const absolute = new URL(src, window.location.href).href;
+    if (this.track.src === absolute) return;
+    this.track.src = src;
+    try {
+      await this.track.play();
+    } catch {
+      this.stopMusic();
+      await this.toggleMusic(channel);
+    }
   }
 
   private closeIfSilent(): void {
@@ -1427,6 +1470,10 @@ function channelScale(channel: RadioChannel): number[] {
     case "all":
       return [root, root * 1.25, root * 1.5, root * 2, root * 1.5, root * 1.125];
   }
+}
+
+function trackForChannel(channel: RadioChannel): string | undefined {
+  return RADIO_TRACKS[channel] ?? RADIO_TRACKS.all;
 }
 
 let stylesInjected = false;
