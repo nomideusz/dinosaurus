@@ -582,11 +582,13 @@ export class MessageWorld {
         </select>
       </label>
       <button type="button" class="radio-sound" aria-pressed="false">sound off</button>
+      <button type="button" class="radio-music" aria-pressed="false">music off</button>
       <span class="radio-status" aria-live="polite">tuned</span>
     `;
     const channel = controls.querySelector<HTMLSelectElement>(".radio-channel")!;
     const pace = controls.querySelector<HTMLSelectElement>(".radio-pace")!;
     const sound = controls.querySelector<HTMLButtonElement>(".radio-sound")!;
+    const music = controls.querySelector<HTMLButtonElement>(".radio-music")!;
     this.radioStatusEl = controls.querySelector<HTMLSpanElement>(".radio-status");
     channel.value = this.radioPrefs.channel;
     pace.value = this.radioPrefs.pace;
@@ -603,6 +605,12 @@ export class MessageWorld {
       sound.textContent = enabled ? "sound on" : "sound off";
       sound.setAttribute("aria-pressed", String(enabled));
       this.setRadioStatus(enabled ? "broadcasting" : "muted");
+    });
+    music.addEventListener("click", async () => {
+      const enabled = await this.radioAudio.toggleMusic(this.radioPrefs.channel);
+      music.textContent = enabled ? "music on" : "music off";
+      music.setAttribute("aria-pressed", String(enabled));
+      this.setRadioStatus(enabled ? "music tuned" : "music muted");
     });
     this.stage.appendChild(controls);
   }
@@ -1198,8 +1206,13 @@ class RadioAudio {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private hum: OscillatorNode | null = null;
+  private musicGain: GainNode | null = null;
   private staticTimer: number | null = null;
+  private musicTimer: number | null = null;
+  private musicStep = 0;
+  private musicChannel: RadioChannel = "all";
   private enabled = false;
+  private musicEnabled = false;
 
   async toggle(channel: RadioChannel): Promise<boolean> {
     if (this.enabled) {
@@ -1210,10 +1223,23 @@ class RadioAudio {
     return this.enabled;
   }
 
+  async toggleMusic(channel: RadioChannel): Promise<boolean> {
+    if (this.musicEnabled) {
+      this.stopMusic();
+      return false;
+    }
+    await this.ensureStarted(channel);
+    this.startMusic(channel);
+    return this.musicEnabled;
+  }
+
   tune(channel: RadioChannel): void {
-    if (!this.enabled || !this.ctx || !this.hum) return;
-    this.hum.frequency.setTargetAtTime(channelFrequency(channel), this.ctx.currentTime, 0.04);
-    this.staticBurst(0.16, 0.018);
+    this.musicChannel = channel;
+    if (!this.ctx) return;
+    if (this.enabled && this.hum) {
+      this.hum.frequency.setTargetAtTime(channelFrequency(channel), this.ctx.currentTime, 0.04);
+      this.staticBurst(0.16, 0.018);
+    }
   }
 
   item(kind: ContentKind): void {
@@ -1229,6 +1255,30 @@ class RadioAudio {
   }
 
   private async start(channel: RadioChannel): Promise<void> {
+    await this.ensureStarted(channel);
+    if (!this.ctx || !this.master) return;
+    if (this.hum) {
+      this.enabled = true;
+      return;
+    }
+    const hum = this.ctx.createOscillator();
+    hum.type = "triangle";
+    hum.frequency.value = channelFrequency(channel);
+    hum.connect(this.master);
+    hum.start();
+
+    this.hum = hum;
+    this.enabled = true;
+    this.staticTimer = window.setInterval(() => this.staticBurst(0.08, 0.008), 3_500);
+    this.tune(channel);
+  }
+
+  private async ensureStarted(channel: RadioChannel): Promise<void> {
+    this.musicChannel = channel;
+    if (this.ctx && this.master) {
+      await this.ctx.resume();
+      return;
+    }
     const AudioCtor =
       window.AudioContext ??
       (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
@@ -1239,29 +1289,46 @@ class RadioAudio {
     master.gain.value = 0.025;
     master.connect(ctx.destination);
 
-    const hum = ctx.createOscillator();
-    hum.type = "triangle";
-    hum.frequency.value = channelFrequency(channel);
-    hum.connect(master);
-    hum.start();
-
     this.ctx = ctx;
     this.master = master;
-    this.hum = hum;
-    this.enabled = true;
-    this.staticTimer = window.setInterval(() => this.staticBurst(0.08, 0.008), 3_500);
-    this.tune(channel);
   }
 
   private stop(): void {
     if (this.staticTimer !== null) window.clearInterval(this.staticTimer);
     this.staticTimer = null;
     this.hum?.stop();
+    this.hum = null;
+    this.enabled = false;
+    if (!this.musicEnabled) this.closeIfSilent();
+  }
+
+  private startMusic(channel: RadioChannel): void {
+    if (!this.ctx || !this.master || this.musicEnabled) return;
+    this.musicChannel = channel;
+    const gain = this.ctx.createGain();
+    gain.gain.value = 0.035;
+    gain.connect(this.master);
+    this.musicGain = gain;
+    this.musicEnabled = true;
+    this.musicStep = 0;
+    this.musicTimer = window.setInterval(() => this.playMusicStep(), 320);
+    this.playMusicStep();
+  }
+
+  private stopMusic(): void {
+    if (this.musicTimer !== null) window.clearInterval(this.musicTimer);
+    this.musicTimer = null;
+    this.musicGain?.disconnect();
+    this.musicGain = null;
+    this.musicEnabled = false;
+    this.closeIfSilent();
+  }
+
+  private closeIfSilent(): void {
+    if (this.enabled || this.musicEnabled) return;
     void this.ctx?.close();
     this.ctx = null;
     this.master = null;
-    this.hum = null;
-    this.enabled = false;
   }
 
   private beep(freq: number, startAt: number, duration: number): void {
@@ -1276,6 +1343,36 @@ class RadioAudio {
     osc.connect(gain).connect(this.master);
     osc.start(startAt);
     osc.stop(startAt + duration + 0.02);
+  }
+
+  private playMusicStep(): void {
+    if (!this.ctx || !this.musicGain) return;
+    const scale = channelScale(this.musicChannel);
+    const freq = scale[this.musicStep % scale.length];
+    const now = this.ctx.currentTime;
+    this.musicNote(freq, now, 0.22);
+    if (this.musicStep % 4 === 0) this.musicNote(freq / 2, now, 0.28, "triangle", 0.45);
+    this.musicStep += 1;
+  }
+
+  private musicNote(
+    freq: number,
+    startAt: number,
+    duration: number,
+    type: OscillatorType = "sine",
+    level = 1
+  ): void {
+    if (!this.ctx || !this.musicGain) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = type;
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0.0001, startAt);
+    gain.gain.exponentialRampToValueAtTime(0.08 * level, startAt + 0.025);
+    gain.gain.exponentialRampToValueAtTime(0.0001, startAt + duration);
+    osc.connect(gain).connect(this.musicGain);
+    osc.start(startAt);
+    osc.stop(startAt + duration + 0.03);
   }
 
   private staticBurst(duration: number, gainValue: number): void {
@@ -1312,6 +1409,24 @@ function channelFrequency(channel: RadioChannel): number {
 
 function kindFrequency(kind: ContentKind): number {
   return channelFrequency(kind === "weather" ? "all" : kind);
+}
+
+function channelScale(channel: RadioChannel): number[] {
+  const root = channelFrequency(channel) * 2;
+  switch (channel) {
+    case "news":
+      return [root, root * 1.25, root * 1.5, root * 2, root * 1.5, root * 1.25];
+    case "quake":
+      return [root, root * 1.2, root * 1.33, root * 1.6, root * 1.33, root * 1.2];
+    case "history":
+      return [root, root * 1.125, root * 1.5, root * 1.875, root * 1.5, root * 1.125];
+    case "fact":
+      return [root, root * 1.25, root * 1.5, root * 1.875, root * 1.5, root * 1.25];
+    case "thought":
+      return [root, root * 1.2, root * 1.5, root * 1.8, root * 1.5, root * 1.2];
+    case "all":
+      return [root, root * 1.25, root * 1.5, root * 2, root * 1.5, root * 1.125];
+  }
 }
 
 let stylesInjected = false;
@@ -1428,7 +1543,8 @@ function injectStylesOnce(): void {
       letter-spacing: 0;
       text-transform: none;
     }
-    .radio-sound {
+    .radio-sound,
+    .radio-music {
       background: transparent;
       color: var(--ink, #e8e4d8);
       border: 1px solid var(--ink-soft, #8a8678);
@@ -1438,7 +1554,8 @@ function injectStylesOnce(): void {
       text-transform: none;
       cursor: pointer;
     }
-    .radio-sound[aria-pressed="true"] {
+    .radio-sound[aria-pressed="true"],
+    .radio-music[aria-pressed="true"] {
       background: var(--ink, #e8e4d8);
       color: var(--paper, #1f1e26);
     }
