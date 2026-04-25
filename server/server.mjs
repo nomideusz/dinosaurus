@@ -8,7 +8,9 @@
 // which is fine for a 24-hour rolling window.
 
 import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { dirname } from "node:path";
 
 import { Narrator } from "./narrator.mjs";
 import { DevTo } from "./sources/devto.mjs";
@@ -23,6 +25,14 @@ const PORT = Number(process.env.PORT ?? 8080);
 const ARCHIVE_TTL_MS = 24 * 60 * 60 * 1000;
 /** Hard cap per kind so a misbehaving client can't blow up memory. */
 const MAX_PER_KIND = 1000;
+/**
+ * Optional disk path for snapshotting the bins between restarts. When set
+ * (e.g. /data/bins.json on a Railway volume), the server loads from it on
+ * boot and writes back periodically + on shutdown so a redeploy doesn't
+ * wipe the 24-hour archive. Unset = original in-memory-only behavior.
+ */
+const ARCHIVE_PERSIST_PATH = process.env.ARCHIVE_PERSIST_PATH ?? null;
+const ARCHIVE_PERSIST_INTERVAL_MS = 60_000;
 const ACTIVE_ITEM_TTL_MS = 5 * 60_000;
 const CLAIM_LEASE_MS = 45_000;
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -100,6 +110,86 @@ function prune() {
   }
 }
 
+// ── Disk snapshot persistence ────────────────────────────────────────────
+//
+// Bins live in memory. To survive a redeploy we periodically serialise them
+// to a JSON file (typically on a Railway volume) and reload on the next
+// boot. Atomic via tmp-file + rename so a crash mid-write can't corrupt the
+// snapshot. A dirty flag avoids needless writes when nothing has changed.
+
+let archiveDirty = false;
+function markArchiveDirty() {
+  archiveDirty = true;
+}
+
+function loadArchiveFromDisk() {
+  if (!ARCHIVE_PERSIST_PATH) return;
+  let raw;
+  try {
+    raw = readFileSync(ARCHIVE_PERSIST_PATH, "utf-8");
+  } catch (err) {
+    if (err.code === "ENOENT") {
+      console.log(`[archive] no snapshot at ${ARCHIVE_PERSIST_PATH} — starting empty`);
+    } else {
+      console.warn(`[archive] could not read snapshot, starting empty:`, err.message);
+    }
+    return;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    console.warn(`[archive] snapshot malformed, starting empty:`, err.message);
+    return;
+  }
+  if (!parsed || typeof parsed !== "object" || !parsed.bins || typeof parsed.bins !== "object") {
+    console.warn(`[archive] snapshot has unexpected shape, starting empty`);
+    return;
+  }
+  const cutoff = Date.now() - ARCHIVE_TTL_MS;
+  let total = 0;
+  for (const [kind, list] of Object.entries(parsed.bins)) {
+    if (!ALLOWED_KINDS.has(kind) || !Array.isArray(list)) continue;
+    const fresh = list
+      .filter(
+        (it) =>
+          it &&
+          typeof it === "object" &&
+          typeof it.id === "string" &&
+          it.kind === kind &&
+          typeof it.text === "string" &&
+          typeof it.deliveredAt === "number" &&
+          it.deliveredAt >= cutoff
+      )
+      .slice(0, MAX_PER_KIND);
+    if (fresh.length > 0) {
+      bins.set(kind, fresh);
+      total += fresh.length;
+    }
+  }
+  console.log(
+    `[archive] loaded ${total} item${total === 1 ? "" : "s"} from ${ARCHIVE_PERSIST_PATH}`
+  );
+}
+
+function saveArchiveToDisk(force = false) {
+  if (!ARCHIVE_PERSIST_PATH) return;
+  if (!archiveDirty && !force) return;
+  try {
+    prune();
+    const out = {};
+    for (const [kind, list] of bins) out[kind] = list;
+    const payload = JSON.stringify({ savedAt: Date.now(), bins: out });
+    const tmp = `${ARCHIVE_PERSIST_PATH}.tmp`;
+    mkdirSync(dirname(ARCHIVE_PERSIST_PATH), { recursive: true });
+    writeFileSync(tmp, payload);
+    renameSync(tmp, ARCHIVE_PERSIST_PATH);
+    archiveDirty = false;
+  } catch (err) {
+    console.warn(`[archive] snapshot write failed:`, err.message);
+  }
+}
+
 function snapshot() {
   prune();
   /** @type {Record<string, unknown[]>} */
@@ -161,6 +251,7 @@ function addDeliveredItem(item) {
   if (filtered.length > MAX_PER_KIND) filtered.length = MAX_PER_KIND;
   bins.set(item.kind, filtered);
   activeItems.delete(item.id);
+  markArchiveDirty();
   broadcastEvent({ type: "add", item });
   broadcastRealtime({ type: "item_delivered", item });
 }
@@ -284,6 +375,7 @@ setInterval(() => {
     else if (fresh.length !== list.length) bins.set(kind, fresh);
   }
   if (expired.length > 0) {
+    markArchiveDirty();
     broadcastEvent({ type: "expire", ids: expired });
     broadcastRealtime({ type: "items_expired", ids: expired });
   }
@@ -599,8 +691,33 @@ function handleDeliver(client, id) {
   });
 }
 
+// Restore the previous snapshot (if persistence is enabled) before opening
+// the port — clients connecting at boot get a populated archive immediately
+// instead of an empty one that fills back up over the next polling cycle.
+loadArchiveFromDisk();
+
+if (ARCHIVE_PERSIST_PATH) {
+  setInterval(() => saveArchiveToDisk(), ARCHIVE_PERSIST_INTERVAL_MS).unref?.();
+  // Railway sends SIGTERM ~10s before forcibly killing the container on a
+  // redeploy; flush synchronously so the next boot picks up the latest state.
+  let shuttingDown = false;
+  const shutdown = (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[archive] received ${signal}, flushing snapshot…`);
+    saveArchiveToDisk(true);
+    process.exit(0);
+  };
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+}
+
 server.listen(PORT, () => {
-  console.log(`[archive] listening on :${PORT} (TTL ${ARCHIVE_TTL_MS}ms)`);
+  console.log(
+    `[archive] listening on :${PORT} (TTL ${ARCHIVE_TTL_MS}ms, persist=${
+      ARCHIVE_PERSIST_PATH ?? "off"
+    })`
+  );
 });
 
 // One narrator for everyone. Each client used to poll HN/DEV.to/USGS/etc.
