@@ -8,7 +8,8 @@ export type ContentKind =
   | "fact"
   | "thought"
   | "quake"
-  | "history";
+  | "history"
+  | "space";
 
 export interface ContentItem {
   /** Stable ID — used to avoid repeating the same item. */

@@ -17,6 +17,7 @@ import { HackerNews } from "./sources/hn.mjs";
 import { History } from "./sources/history.mjs";
 import { Musings } from "./sources/musings.mjs";
 import { Quakes } from "./sources/quakes.mjs";
+import { Space } from "./sources/space.mjs";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const ARCHIVE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -33,8 +34,9 @@ const ALLOWED_KINDS = new Set([
   "thought",
   "quake",
   "history",
+  "space",
 ]);
-const DEFAULT_CHANNELS = ["news", "fact", "thought", "quake", "history"];
+const DEFAULT_CHANNELS = ["news", "fact", "thought", "quake", "history", "space"];
 const PACES = new Set(["chill", "normal", "busy"]);
 
 /**
@@ -610,4 +612,5 @@ narrator.registerSource(Quakes);
 narrator.registerSource(History);
 narrator.registerSource(Facts);
 narrator.registerSource(Musings);
+narrator.registerSource(Space);
 narrator.start();

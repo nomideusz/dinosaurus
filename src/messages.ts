@@ -103,8 +103,17 @@ const ARCHIVE_TTL_MS = 24 * 60 * 60 * 1000;
 /** How often the client polls the server for items others have sorted. */
 const ARCHIVE_REFRESH_INTERVAL_MS = 60_000;
 const CARD_SPAWN_GAP_MS = 2_500;
+
+// Pattern reactions: the dino notices when the same word keeps coming up
+// in incoming items and spins out a small "thought" of its own. Tuned to
+// be quietly observant, not chatty.
+const PATTERN_COOLDOWN_MS = 90_000;
+const PATTERN_WINDOW_MS = 15 * 60_000;
+const PATTERN_BUFFER_MAX = 32;
+const PATTERN_MIN_ITEMS = 5;
+const PATTERN_MIN_DOC_COUNT = 3;
 const RADIO_STORAGE_KEY = "dinosaurus.radio.v1";
-const RADIO_CHANNELS = ["news", "quake", "history", "fact", "thought"] as const;
+const RADIO_CHANNELS = ["news", "quake", "history", "fact", "thought", "space"] as const;
 const RADIO_TRACKS: Partial<Record<RadioChannel, string>> = {
   all: "/audio/radio/Mungo%20Jerry%20-%20%27%27In%20The%20Summertime%27%27.mp3",
 };
@@ -142,6 +151,13 @@ export class MessageWorld {
   private radioStatusEl: HTMLSpanElement | null = null;
   private readonly radioAudio = new RadioAudio();
   private lastBacklogWarningAt = 0;
+  /** Rolling window of incoming items used to detect recurring keywords. */
+  private readonly recentForPattern: Array<{ kind: ContentKind; text: string; at: number }> = [];
+  private lastPatternAt = 0;
+  private lastPatternWord = "";
+  /** IDs of locally-synthesised pattern cards — skipped from pattern recording
+   *  to avoid the dino observing its own observations. */
+  private readonly syntheticPatternIds = new Set<string>();
 
   constructor(
     parent: HTMLElement,
@@ -272,6 +288,8 @@ export class MessageWorld {
    * dino from "delivering" cards that would just be duplicates server-side.
    */
   spawn(item: ContentItem): FloatingMessage | null {
+    const isSynthetic = this.syntheticPatternIds.has(item.id);
+    if (isSynthetic) this.syntheticPatternIds.delete(item.id);
     if (this.messages.has(item.id)) return this.messages.get(item.id) ?? null;
     if (this.isInArchive(item.id)) return null;
     if (this.messages.size >= this.maxConcurrent) return null;
@@ -348,7 +366,61 @@ export class MessageWorld {
 
     this.onSpawn?.(item);
     this.radioAudio.item(item.kind);
+
+    // Pattern detection runs on real items only — synthetic pattern cards
+    // shouldn't observe themselves into a feedback loop.
+    if (!isSynthetic) {
+      this.recordForPattern(item);
+      this.maybeSpawnPattern(item.kind);
+    }
     return msg;
+  }
+
+  private recordForPattern(item: ContentItem): void {
+    this.recentForPattern.push({
+      kind: item.kind,
+      text: item.text,
+      at: performance.now(),
+    });
+    if (this.recentForPattern.length > PATTERN_BUFFER_MAX) {
+      this.recentForPattern.shift();
+    }
+  }
+
+  private maybeSpawnPattern(kind: ContentKind): void {
+    const now = performance.now();
+    if (now - this.lastPatternAt < PATTERN_COOLDOWN_MS) return;
+
+    const cutoff = now - PATTERN_WINDOW_MS;
+    const recent = this.recentForPattern.filter(
+      (r) => r.kind === kind && r.at >= cutoff
+    );
+    if (recent.length < PATTERN_MIN_ITEMS) return;
+
+    const top = findTopKeyword(recent);
+    if (!top || top.docCount < PATTERN_MIN_DOC_COUNT) return;
+    if (top.word === this.lastPatternWord) return;
+
+    // Don't fire a pattern card if the thoughts bin already shows one — would
+    // crowd the same observation against itself.
+    if (!this.binFor("thought")) return;
+
+    this.lastPatternAt = now;
+    this.lastPatternWord = top.word;
+
+    const id = `${SYNTHETIC_PATTERN_PREFIX}${Date.now().toString(36)}:${top.word}`;
+    this.syntheticPatternIds.add(id);
+    const text = patternPhrase(top.word, top.docCount, kind);
+    const spawned = this.spawn({
+      id,
+      kind: "thought",
+      text,
+      publishedAt: Date.now(),
+      score: 0.55,
+    });
+    // If the spawn was rejected (already in archive, max concurrent, etc.),
+    // discard the synthetic id so the set doesn't leak.
+    if (!spawned) this.syntheticPatternIds.delete(id);
   }
 
   /**
@@ -427,8 +499,12 @@ export class MessageWorld {
     bin.count = bin.delivered.length;
     bin.countEl.textContent = String(bin.count);
     if (this.archiveOverlay) this.archiveOverlay.refreshIfShowing(bin);
-    if (this.realtimeConnected) this.sendRealtime({ type: "deliver", id: newItem.id });
-    else void this.pushDelivery(newItem);
+    // Pattern cards are local-only — the server never saw them, so don't
+    // try to sync them. They live in the visitor's archive only.
+    if (!isSyntheticPatternId(newItem.id)) {
+      if (this.realtimeConnected) this.sendRealtime({ type: "deliver", id: newItem.id });
+      else void this.pushDelivery(newItem);
+    }
     bumpBin(bin);
     return true;
   }
@@ -575,6 +651,7 @@ export class MessageWorld {
           <option value="history">history</option>
           <option value="fact">facts</option>
           <option value="thought">thoughts</option>
+          <option value="space">space</option>
         </select>
       </label>
       <button type="button" class="radio-music" aria-pressed="false">music off</button>
@@ -852,7 +929,10 @@ export class MessageWorld {
       const before = bin.count;
       // Trust the server's ordering (newest first), but still prune in case
       // the client clock disagrees enough to keep something past the TTL.
-      bin.delivered = list.slice();
+      // Locally-synthesised pattern cards are preserved — the server doesn't
+      // know about them and would otherwise wipe them on every snapshot.
+      const localOnly = bin.delivered.filter((d) => isSyntheticPatternId(d.id));
+      bin.delivered = [...localOnly, ...list];
       pruneExpired(bin);
       bin.count = bin.delivered.length;
       bin.countEl.textContent = String(bin.count);
@@ -1213,6 +1293,8 @@ function kindLabel(kind: ContentKind): string {
       return "quake";
     case "history":
       return "history";
+    case "space":
+      return "space";
   }
 }
 
@@ -1230,7 +1312,106 @@ function kindIcon(kind: ContentKind): string {
       return "↯";
     case "history":
       return "⧗";
+    case "space":
+      return "☄";
   }
+}
+
+// ── Pattern detection helpers ────────────────────────────────────────────
+
+/** Synthetic pattern-card ids carry this prefix so the rest of the system
+ *  can recognise them and skip server sync / preserve across snapshots. */
+const SYNTHETIC_PATTERN_PREFIX = "__pattern__:";
+function isSyntheticPatternId(id: string): boolean {
+  return id.startsWith(SYNTHETIC_PATTERN_PREFIX);
+}
+
+const STOP_WORDS = new Set([
+  // articles + conjunctions
+  "the", "and", "but", "nor", "yet", "for",
+  // prepositions
+  "of", "to", "in", "on", "at", "by", "from", "with", "about", "into", "onto",
+  "upon", "over", "under", "after", "before", "since", "during", "between",
+  "through", "via", "per", "off", "out",
+  // common verbs / aux
+  "is", "are", "was", "were", "be", "been", "being",
+  "has", "have", "had",
+  "do", "does", "did",
+  "will", "would", "should", "could", "may", "might", "must", "can",
+  "say", "says", "said", "told", "make", "made", "get", "got", "gets",
+  "see", "saw", "seen", "look", "took", "take", "give", "gave", "use", "used",
+  // pronouns
+  "you", "your", "yours", "our", "ours",
+  "his", "her", "hers", "its", "they", "them", "their", "theirs",
+  // demonstratives + interrogatives
+  "this", "that", "these", "those",
+  "what", "when", "where", "why", "how", "who", "whom", "which", "whose",
+  // common modifiers / fillers
+  "not", "yes", "all", "any", "some", "many", "much", "more", "most",
+  "less", "least", "few", "very", "too", "just", "also", "only", "even",
+  "still", "than", "then", "now", "here", "there", "ever", "never", "always",
+  "often", "again", "back", "such",
+  "though", "although", "because", "however", "instead", "while", "until",
+  "well", "way", "ways", "thing", "things",
+  "year", "years", "today", "yesterday", "tomorrow", "day", "days",
+  "time", "times", "new", "old",
+  // numbers spelled
+  "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+]);
+
+/** Tokenize text into deduped, normalised content words (excludes stop words
+ *  and pure-numeric tokens). */
+function patternTokens(text: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of text.toLowerCase().split(/[^a-z0-9]+/)) {
+    if (raw.length < 3) continue;
+    if (STOP_WORDS.has(raw)) continue;
+    if (/^\d+$/.test(raw)) continue;
+    if (seen.has(raw)) continue;
+    seen.add(raw);
+    out.push(raw);
+  }
+  return out;
+}
+
+/** Find the word that appears in the most distinct items in the buffer. */
+function findTopKeyword(
+  items: Array<{ text: string }>
+): { word: string; docCount: number } | null {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    for (const tok of patternTokens(item.text)) {
+      counts.set(tok, (counts.get(tok) ?? 0) + 1);
+    }
+  }
+  let best = "";
+  let bestCount = 0;
+  for (const [w, c] of counts) {
+    // Tiebreaker: prefer the longer word — usually carries more meaning.
+    if (c > bestCount || (c === bestCount && w.length > best.length)) {
+      best = w;
+      bestCount = c;
+    }
+  }
+  return best ? { word: best, docCount: bestCount } : null;
+}
+
+/** Pick a slightly varied phrasing so the dino's "noticing" doesn't feel
+ *  canned when it fires more than once a session. */
+function patternPhrase(word: string, count: number, kind: ContentKind): string {
+  const W = word.charAt(0).toUpperCase() + word.slice(1);
+  const k = kindLabel(kind);
+  const phrases = [
+    `${W} keeps coming up — ${count} ${k} items mention it`,
+    `everyone's talking about ${W} (${count}× in ${k})`,
+    `${W} is having a moment`,
+    `pattern: ${W} ×${count}`,
+    `is it just me, or is ${W} everywhere today?`,
+    `the ${k} keeps saying ${W}`,
+    `noticing: ${W} in ${count} ${k} items`,
+  ];
+  return phrases[Math.floor(Math.random() * phrases.length)];
 }
 
 function escapeHtml(s: string): string {
@@ -1308,6 +1489,7 @@ function radioChannelLabel(channel: RadioChannel): string {
       return "thoughts";
     case "history":
     case "news":
+    case "space":
       return channel;
   }
 }
@@ -1552,6 +1734,8 @@ function channelFrequency(channel: RadioChannel): number {
       return 148;
     case "thought":
       return 174;
+    case "space":
+      return 88;
     case "all":
       return 122;
   }
@@ -1574,6 +1758,9 @@ function channelScale(channel: RadioChannel): number[] {
       return [root, root * 1.25, root * 1.5, root * 1.875, root * 1.5, root * 1.25];
     case "thought":
       return [root, root * 1.2, root * 1.5, root * 1.8, root * 1.5, root * 1.2];
+    case "space":
+      // Wider, slower-feeling intervals — more "drift" in the synth scale.
+      return [root, root * 1.5, root * 2, root * 3, root * 2, root * 1.5];
     case "all":
       return [root, root * 1.25, root * 1.5, root * 2, root * 1.5, root * 1.125];
   }
@@ -1674,6 +1861,7 @@ function injectStylesOnce(): void {
     .msg--thought { --accent: #c8a8ff; }
     .msg--quake   { --accent: #f3c969; }
     .msg--history { --accent: #d4a574; }
+    .msg--space   { --accent: #9eb5ff; }
     .msg:hover .msg__head { border-bottom-color: var(--accent, rgba(138, 134, 120, 0.32)); }
 
     .radio-controls {
@@ -1807,6 +1995,7 @@ function injectStylesOnce(): void {
     .bin--thought { border-bottom: 4px solid #c8a8ff; }
     .bin--quake   { border-bottom: 4px solid #f3c969; }
     .bin--history { border-bottom: 4px solid #d4a574; }
+    .bin--space   { border-bottom: 4px solid #9eb5ff; }
 
     .archive-backdrop {
       position: absolute;
@@ -1849,6 +2038,7 @@ function injectStylesOnce(): void {
     .archive-panel[data-kind="thought"] { --accent: #c8a8ff; border-top: 4px solid var(--accent); }
     .archive-panel[data-kind="quake"]   { --accent: #f3c969; border-top: 4px solid var(--accent); }
     .archive-panel[data-kind="history"] { --accent: #d4a574; border-top: 4px solid var(--accent); }
+    .archive-panel[data-kind="space"]   { --accent: #9eb5ff; border-top: 4px solid var(--accent); }
 
     .archive__head {
       display: flex;

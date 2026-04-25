@@ -58,6 +58,7 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
       { kind: "history", label: "history", icon: "⧗" },
       { kind: "fact", label: "facts", icon: "❍" },
       { kind: "thought", label: "thoughts", icon: "✦" },
+      { kind: "space", label: "space", icon: "☄" },
     ],
     cssW,
     cssH,
@@ -257,6 +258,8 @@ function deliveryMoodFor(kind: ContentKind): Mood {
       return "angry"; // the earth shaking is alarming
     case "history":
       return "curious";
+    case "space":
+      return "surprised"; // a small "wow" — looks up
   }
 }
 
