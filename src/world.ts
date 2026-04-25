@@ -7,10 +7,16 @@
 // remains visible against the sky at every hour of the day.
 
 import { THEME } from "./theme.js";
+import type { WeatherConditions } from "./weather.js";
 
 export interface WorldState {
   width: number;
   height: number;
+}
+
+export interface WorldOptions {
+  /** Polled each frame for current weather. Returning null = clear sky. */
+  weather?: () => WeatherConditions | null;
 }
 
 type RGB = [number, number, number];
@@ -51,16 +57,46 @@ interface Star {
   twinklePhase: number;
 }
 
+interface Cloud {
+  /** Anchor x in [0, 1] of world width — wraps at edges. */
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Drift speed, fraction of world width per second. */
+  drift: number;
+  /** Per-cloud silhouette seed so each puff looks slightly different. */
+  seed: number;
+}
+
+interface Drop {
+  x: number;
+  y: number;
+  vy: number;
+  /** Sideways drift amplitude in pixels (snow only). */
+  sway: number;
+  swayPhase: number;
+}
+
 export class World {
   private stars: Star[] = [];
+  private clouds: Cloud[] = [];
+  private drops: Drop[] = [];
+  private dropsKind: "rain" | "snow" | "none" = "none";
+  private readonly weatherFn: () => WeatherConditions | null;
 
-  constructor(private state: WorldState) {
+  constructor(private state: WorldState, opts: WorldOptions = {}) {
+    this.weatherFn = opts.weather ?? (() => null);
     this.regenStars();
+    this.regenClouds();
   }
 
   resize(state: WorldState): void {
     this.state = state;
     this.regenStars();
+    this.regenClouds();
+    this.drops = [];
+    this.dropsKind = "none";
   }
 
   get width(): number {
@@ -70,15 +106,19 @@ export class World {
     return this.state.height;
   }
 
-  // The world is fully driven by the wall clock — nothing to advance per frame.
-  update(_dtMs: number): void {
-    void _dtMs;
+  // The world is fully driven by the wall clock — nothing to advance per frame
+  // for the sky itself, but we do step weather particles.
+  update(dtMs: number): void {
+    const wx = this.weatherFn();
+    this.tickClouds(wx, dtMs);
+    this.tickDrops(wx, dtMs);
   }
 
   draw(ctx: CanvasRenderingContext2D): void {
     const { width, height } = this.state;
     const date = new Date();
     const h = date.getHours() + date.getMinutes() / 60 + date.getSeconds() / 3600;
+    const wx = this.weatherFn();
 
     // Sky gradient
     const [topRGB, bottomRGB] = this.skyAt(h);
@@ -88,12 +128,27 @@ export class World {
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, width, height);
 
-    // Stars (only at night-ish hours, with smooth fade in/out at twilight)
-    const sa = starAlpha(h);
+    // Stars (only at night-ish hours; heavy clouds also dim them).
+    const cloudAlpha = wx ? cloudAlphaFor(wx) : 0;
+    const sa = starAlpha(h) * (1 - cloudAlpha * 0.7);
     if (sa > 0.01) this.drawStars(ctx, sa);
 
-    // Sun (by day) or moon (by night) arcing across the sky
-    this.drawCelestial(ctx, h);
+    // Sun (by day) or moon (by night) arcing across the sky.
+    this.drawCelestial(ctx, h, 1 - cloudAlpha * 0.55);
+
+    // Cloud overlay sits between the celestial body and the foreground.
+    if (this.clouds.length > 0 && cloudAlpha > 0) {
+      this.drawClouds(ctx, cloudAlpha, wx);
+    }
+
+    // Fog haze — flat translucent overlay that mutes the whole frame.
+    if (wx?.fog) {
+      ctx.fillStyle = "rgba(180, 184, 196, 0.18)";
+      ctx.fillRect(0, 0, width, height);
+    }
+
+    // Rain / snow particles in front of the clouds.
+    if (this.drops.length > 0) this.drawDrops(ctx);
 
     // Quiet graph-paper dot grid on top
     ctx.fillStyle = THEME.grid;
@@ -138,7 +193,7 @@ export class World {
     }
   }
 
-  private drawCelestial(ctx: CanvasRenderingContext2D, h: number): void {
+  private drawCelestial(ctx: CanvasRenderingContext2D, h: number, dim = 1): void {
     const isSun = h >= SUN_RISE && h <= SUN_SET;
 
     let t: number;
@@ -156,6 +211,9 @@ export class World {
     const baseY = this.state.height * 0.22;
     const arcHeight = this.state.height * 0.13;
     const y = baseY - Math.sin(t * Math.PI) * arcHeight;
+
+    ctx.save();
+    ctx.globalAlpha = Math.max(0.2, dim);
 
     if (isSun) {
       // Glow (radial gradient, warm)
@@ -191,6 +249,137 @@ export class World {
       ctx.arc(x + r * 0.10, y + r * 0.45, r * 0.12, 0, Math.PI * 2);
       ctx.fill();
     }
+
+    ctx.restore();
+  }
+
+  private tickClouds(wx: WeatherConditions | null, dtMs: number): void {
+    if (!wx || wx.cloudiness === 0) return;
+    const dt = dtMs / 1000;
+    for (const cloud of this.clouds) {
+      cloud.x += cloud.drift * dt;
+      // Wrap horizontally — fraction-of-width coordinates make this trivial.
+      if (cloud.x > 1.15) cloud.x -= 1.3;
+      else if (cloud.x < -0.15) cloud.x += 1.3;
+    }
+  }
+
+  private tickDrops(wx: WeatherConditions | null, dtMs: number): void {
+    const wantKind: "rain" | "snow" | "none" = wx?.precipitation ?? "none";
+    if (wantKind !== this.dropsKind) {
+      this.dropsKind = wantKind;
+      this.regenDrops(wx);
+    }
+    if (this.drops.length === 0 || wantKind === "none") return;
+    const dt = dtMs / 1000;
+    const { width, height } = this.state;
+    for (const d of this.drops) {
+      d.y += d.vy * dt;
+      if (wantKind === "snow") {
+        d.swayPhase += dt * 1.4;
+        // Snow has visible horizontal sway via swayPhase; rain stays vertical.
+      }
+      if (d.y > height + 8) {
+        d.y = -8;
+        d.x = Math.random() * width;
+      }
+    }
+  }
+
+  private drawClouds(
+    ctx: CanvasRenderingContext2D,
+    alpha: number,
+    wx: WeatherConditions | null
+  ): void {
+    const tint = wx && (wx.thunder || wx.cloudiness === 2)
+      ? "rgba(58, 58, 70, "
+      : "rgba(220, 222, 232, ";
+    const baseAlpha = alpha * (wx?.thunder ? 0.85 : 0.55);
+    for (const cloud of this.clouds) {
+      const cx = cloud.x * this.state.width;
+      const cy = cloud.y;
+      const w = cloud.width;
+      const h = cloud.height;
+      // A cloud is 4–5 overlapping ellipses; the seed deterministically
+      // varies the puff pattern so each one looks distinct.
+      const lobes = 4 + (cloud.seed & 1);
+      ctx.fillStyle = tint + baseAlpha.toFixed(3) + ")";
+      for (let i = 0; i < lobes; i++) {
+        const offX = ((cloud.seed * (i + 1) * 31) % 100) / 100 - 0.5;
+        const offY = ((cloud.seed * (i + 2) * 17) % 60) / 100 - 0.3;
+        const rx = (w / 2) * (0.55 + ((cloud.seed * (i + 3) * 7) % 40) / 100);
+        const ry = (h / 2) * (0.65 + ((cloud.seed * (i + 4) * 5) % 30) / 100);
+        ctx.beginPath();
+        ctx.ellipse(cx + offX * w * 0.6, cy + offY * h * 0.8, rx, ry, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  private drawDrops(ctx: CanvasRenderingContext2D): void {
+    if (this.dropsKind === "rain") {
+      ctx.strokeStyle = "rgba(170, 190, 220, 0.55)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (const d of this.drops) {
+        ctx.moveTo(d.x, d.y);
+        ctx.lineTo(d.x - 1.5, d.y + 8);
+      }
+      ctx.stroke();
+    } else if (this.dropsKind === "snow") {
+      ctx.fillStyle = "rgba(232, 234, 244, 0.85)";
+      for (const d of this.drops) {
+        const sx = d.x + Math.sin(d.swayPhase) * d.sway;
+        ctx.fillRect(sx | 0, d.y | 0, 1, 1);
+        // Bigger flakes get a 2px cluster.
+        if (d.sway > 1.2) {
+          ctx.fillRect((sx | 0) + 1, d.y | 0, 1, 1);
+          ctx.fillRect(sx | 0, (d.y | 0) + 1, 1, 1);
+        }
+      }
+    }
+  }
+
+  private regenClouds(): void {
+    const count = Math.max(4, Math.round(this.state.width / 220));
+    let seed = 7331;
+    const rand = (): number => {
+      seed = (seed * 9301 + 49297) % 233280;
+      return seed / 233280;
+    };
+    this.clouds = [];
+    const skyBand = this.state.height * 0.42;
+    for (let i = 0; i < count; i++) {
+      const w = 90 + rand() * 130;
+      this.clouds.push({
+        x: rand() * 1.3 - 0.15,
+        y: 30 + rand() * skyBand,
+        width: w,
+        height: w * (0.34 + rand() * 0.16),
+        drift: (rand() < 0.5 ? -1 : 1) * (0.005 + rand() * 0.012),
+        seed: 1 + Math.floor(rand() * 9999),
+      });
+    }
+  }
+
+  private regenDrops(wx: WeatherConditions | null): void {
+    if (!wx || wx.precipitation === "none") {
+      this.drops = [];
+      return;
+    }
+    const isRain = wx.precipitation === "rain";
+    const baseCount = Math.round((this.state.width * this.state.height) / (isRain ? 12_000 : 18_000));
+    const count = Math.round(baseCount * (0.4 + wx.intensity));
+    this.drops = [];
+    for (let i = 0; i < count; i++) {
+      this.drops.push({
+        x: Math.random() * this.state.width,
+        y: Math.random() * this.state.height,
+        vy: isRain ? 280 + Math.random() * 220 : 30 + Math.random() * 50,
+        sway: isRain ? 0 : 0.6 + Math.random() * 1.6,
+        swayPhase: Math.random() * Math.PI * 2,
+      });
+    }
   }
 
   /**
@@ -215,6 +404,21 @@ export class World {
       });
     }
   }
+}
+
+/**
+ * Cloud overlay strength for the current conditions. 0 means no draw,
+ * 1 means full opacity. Heavier cloudiness, thunder, and active rain all
+ * push this higher; intensity adds a small extra weight.
+ */
+function cloudAlphaFor(wx: WeatherConditions): number {
+  let a = 0;
+  if (wx.cloudiness === 1) a = 0.35;
+  else if (wx.cloudiness === 2) a = 0.65;
+  if (wx.thunder) a = Math.max(a, 0.85);
+  if (wx.precipitation === "rain") a = Math.max(a, 0.55);
+  if (wx.precipitation === "snow") a = Math.max(a, 0.5);
+  return Math.min(1, a + wx.intensity * 0.1);
 }
 
 /**

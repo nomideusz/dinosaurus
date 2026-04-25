@@ -9,6 +9,7 @@
 import { Dino, type Mood } from "./dino.js";
 import { MessageWorld, type FloatingMessage } from "./messages.js";
 import type { ContentKind } from "./services/content.js";
+import { WeatherClient } from "./weather.js";
 import { World } from "./world.js";
 
 function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
@@ -34,17 +35,25 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
 
   applySize();
 
-  const world = new World({ width: cssW, height: cssH });
+  // Per-visitor weather: ambient card + sky effects (clouds/rain/snow).
+  // Independent of the shared archive — this is your own local weather.
+  const weather = new WeatherClient(stage);
+
+  const world = new World(
+    { width: cssW, height: cssH },
+    { weather: () => weather.conditions() }
+  );
 
   const dinoScale = Math.max(2, Math.min(4, Math.round(Math.min(cssW, cssH) / 240)));
   const dino = new Dino({ scale: dinoScale, worldWidth: cssW, worldHeight: cssH });
 
   // The bins we start with — one per kind that the server's narrator emits.
+  // Weather is intentionally absent: it's a per-visitor ambient overlay, not
+  // shared content the dino sorts.
   const messages = new MessageWorld(
     stage,
     [
       { kind: "news", label: "news", icon: "▤" },
-      { kind: "weather", label: "weather", icon: "☁" },
       { kind: "quake", label: "quakes", icon: "↯" },
       { kind: "history", label: "history", icon: "⧗" },
       { kind: "fact", label: "facts", icon: "❍" },

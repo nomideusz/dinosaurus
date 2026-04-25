@@ -16,7 +16,6 @@ import { HackerNews } from "./sources/hn.mjs";
 import { History } from "./sources/history.mjs";
 import { Musings } from "./sources/musings.mjs";
 import { Quakes } from "./sources/quakes.mjs";
-import { Weather } from "./sources/weather.mjs";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const ARCHIVE_TTL_MS = 2 * 60 * 60 * 1000;
@@ -245,9 +244,11 @@ const narrator = new Narrator({
   },
   logger: console,
 });
+// Weather is intentionally absent — it's per-visitor (IP-geolocated) and
+// surfaced as a transient ambient card on the client, not stored in the
+// shared archive.
 narrator.registerSource(HackerNews);
 narrator.registerSource(DevTo);
-narrator.registerSource(Weather);
 narrator.registerSource(Quakes);
 narrator.registerSource(History);
 narrator.registerSource(Facts);
