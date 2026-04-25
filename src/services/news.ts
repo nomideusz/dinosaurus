@@ -2,6 +2,7 @@
 // We pull the top story IDs, then hydrate a handful of them.
 
 import type { ContentItem, ContentSource } from "./content.js";
+import { condense, fetchJson, logScore } from "./util.js";
 
 const HN_TOP = "https://hacker-news.firebaseio.com/v0/topstories.json";
 const HN_ITEM = (id: number) => `https://hacker-news.firebaseio.com/v0/item/${id}.json`;
@@ -35,9 +36,9 @@ export class HackerNewsSource implements ContentSource {
       const s = r.value;
       if (!s || !s.title || s.type !== "story") continue;
 
-      const text = condense(s.title);
+      const text = condenseHnTitle(s.title);
       const href = s.url ?? `https://news.ycombinator.com/item?id=${s.id}`;
-      const score = normalizeHnScore(s.score ?? 0);
+      const score = logScore(s.score ?? 0);
       out.push({
         id: `hn:${s.id}`,
         kind: "news",
@@ -52,21 +53,7 @@ export class HackerNewsSource implements ContentSource {
   }
 }
 
-function normalizeHnScore(raw: number): number {
-  // 0..1 mapping that flattens out at the top
-  return Math.min(1, Math.log10(Math.max(1, raw)) / 3.2);
-}
-
-function condense(title: string): string {
-  let t = title.trim();
-  // strip "Show HN:"-style prefixes for a more natural reading voice
-  t = t.replace(/^(Show|Ask|Tell)\s+HN[:：]?\s*/i, "");
-  if (t.length > 140) t = t.slice(0, 137).trimEnd() + "…";
-  return t;
-}
-
-async function fetchJson<T>(url: string, signal: AbortSignal): Promise<T> {
-  const res = await fetch(url, { signal });
-  if (!res.ok) throw new Error(`${url} -> ${res.status}`);
-  return (await res.json()) as T;
+/** Strip HN-specific prefixes for a more natural reading voice. */
+function condenseHnTitle(title: string): string {
+  return condense(title.replace(/^(Show|Ask|Tell)\s+HN[:：]?\s*/i, ""));
 }

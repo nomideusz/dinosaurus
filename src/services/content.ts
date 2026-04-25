@@ -2,7 +2,13 @@
 // behind this interface — news, weather, jokes, fortune cookies, whatever.
 // The narrator picks one item at a time based on score + recency.
 
-export type ContentKind = "news" | "weather" | "fact" | "thought";
+export type ContentKind =
+  | "news"
+  | "weather"
+  | "fact"
+  | "thought"
+  | "quake"
+  | "history";
 
 export interface ContentItem {
   /** Stable ID — used to avoid repeating the same item. */

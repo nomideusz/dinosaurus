@@ -13,7 +13,14 @@ const PORT = Number(process.env.PORT ?? 8080);
 const ARCHIVE_TTL_MS = 2 * 60 * 60 * 1000;
 /** Hard cap per kind so a misbehaving client can't blow up memory. */
 const MAX_PER_KIND = 200;
-const ALLOWED_KINDS = new Set(["news", "weather", "fact", "thought"]);
+const ALLOWED_KINDS = new Set([
+  "news",
+  "weather",
+  "fact",
+  "thought",
+  "quake",
+  "history",
+]);
 
 /** @type {Map<string, Array<{ id: string, kind: string, text: string, href?: string, linkLabel?: string, deliveredAt: number }>>} */
 const bins = new Map();

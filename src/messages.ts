@@ -744,6 +744,10 @@ function kindLabel(kind: ContentKind): string {
       return "fact";
     case "thought":
       return "thought";
+    case "quake":
+      return "quake";
+    case "history":
+      return "history";
   }
 }
 
@@ -839,6 +843,8 @@ function injectStylesOnce(): void {
     .msg--weather { border-left-width: 4px; border-left-color: #7ec8ff; }
     .msg--fact    { border-left-width: 4px; border-left-color: #8dd9a8; }
     .msg--thought { border-left-width: 4px; border-left-color: #c8a8ff; }
+    .msg--quake   { border-left-width: 4px; border-left-color: #f3c969; }
+    .msg--history { border-left-width: 4px; border-left-color: #d4a574; }
 
     .bin-row {
       position: absolute;
@@ -846,8 +852,9 @@ function injectStylesOnce(): void {
       right: 0;
       bottom: 12px;
       display: flex;
+      flex-wrap: wrap;
       justify-content: center;
-      gap: 14px;
+      gap: 10px 14px;
       padding: 0 16px;
       pointer-events: none;
       z-index: 3;
@@ -855,8 +862,8 @@ function injectStylesOnce(): void {
 
     .bin {
       pointer-events: auto;
-      min-width: 120px;
-      max-width: 200px;
+      min-width: 110px;
+      max-width: 180px;
       padding: 6px 10px 8px;
       background: var(--paper, #1f1e26);
       border: 1.5px solid var(--ink, #e8e4d8);
@@ -917,6 +924,8 @@ function injectStylesOnce(): void {
     .bin--weather { border-bottom: 4px solid #7ec8ff; }
     .bin--fact    { border-bottom: 4px solid #8dd9a8; }
     .bin--thought { border-bottom: 4px solid #c8a8ff; }
+    .bin--quake   { border-bottom: 4px solid #f3c969; }
+    .bin--history { border-bottom: 4px solid #d4a574; }
 
     .archive-backdrop {
       position: absolute;
@@ -955,6 +964,8 @@ function injectStylesOnce(): void {
     .archive-panel[data-kind="weather"] { border-top: 4px solid #7ec8ff; }
     .archive-panel[data-kind="fact"]    { border-top: 4px solid #8dd9a8; }
     .archive-panel[data-kind="thought"] { border-top: 4px solid #c8a8ff; }
+    .archive-panel[data-kind="quake"]   { border-top: 4px solid #f3c969; }
+    .archive-panel[data-kind="history"] { border-top: 4px solid #d4a574; }
 
     .archive__head {
       display: flex;

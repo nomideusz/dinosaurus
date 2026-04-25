@@ -9,8 +9,12 @@
 import { Dino } from "./dino.js";
 import { MessageWorld, type FloatingMessage } from "./messages.js";
 import { Narrator } from "./narrator.js";
+import { DevToSource } from "./services/devto.js";
+import { FactsSource } from "./services/facts.js";
+import { HistorySource } from "./services/history.js";
 import { HackerNewsSource } from "./services/news.js";
 import { MusingsSource } from "./services/musings.js";
+import { QuakesSource } from "./services/quakes.js";
 import { WeatherSource } from "./services/weather.js";
 import { World } from "./world.js";
 
@@ -49,6 +53,9 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
     [
       { kind: "news", label: "news", icon: "▤" },
       { kind: "weather", label: "weather", icon: "☁" },
+      { kind: "quake", label: "quakes", icon: "↯" },
+      { kind: "history", label: "history", icon: "⧗" },
+      { kind: "fact", label: "facts", icon: "❍" },
       { kind: "thought", label: "thoughts", icon: "✦" },
     ],
     cssW,
@@ -76,7 +83,11 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
     onItem: (item) => messages.spawn(item) !== null,
   });
   narrator.registerSource(new HackerNewsSource());
+  narrator.registerSource(new DevToSource());
   narrator.registerSource(new WeatherSource());
+  narrator.registerSource(new QuakesSource());
+  narrator.registerSource(new HistorySource());
+  narrator.registerSource(new FactsSource());
   narrator.registerSource(new MusingsSource());
   narrator.start();
 
