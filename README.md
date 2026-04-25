@@ -10,8 +10,8 @@ Built with **Vite + TypeScript**, no images and no API keys. Production runs as
 two small services:
 
 - `dinosaurus-frontend`: the static Vite app served by `static-server.mjs`.
-- `dinosaurus-archive`: an in-memory 2-hour shared archive plus server-sent
-  events, served from `server/server.mjs`.
+- `dinosaurus-archive`: an in-memory 2-hour shared archive plus an
+  authoritative WebSocket realtime endpoint, served from `server/server.mjs`.
 
 ## Quick start
 
@@ -50,8 +50,10 @@ Archive runtime variables:
   `https://dino.zaur.app,http://localhost:5173,http://localhost:5174,http://localhost:4173`.
 
 The frontend reads `VITE_ARCHIVE_URL` at build time, so changing it requires a
-new frontend build/deploy. If archive sync fails, the app keeps working locally
-and logs a one-time browser console warning pointing at these variables.
+new frontend build/deploy. The client connects to `${VITE_ARCHIVE_URL}/realtime`
+with WebSocket and falls back to archive polling/SSE compatibility when needed.
+If archive sync fails, the app keeps working locally and logs a one-time browser
+console warning pointing at these variables.
 
 ## What's inside
 
@@ -67,7 +69,7 @@ src/
     └── content.ts     # shared ContentItem types
 
 server/
-├── server.mjs         # archive API, SSE, CORS, health check
+├── server.mjs         # archive API, WebSocket authority, CORS, health check
 ├── narrator.mjs       # server-side source scheduler and item picker
 └── sources/           # HN, DEV.to, quakes, history, facts, musings
 ```
@@ -76,16 +78,18 @@ server/
 
 1. Each server-side source produces scored items on its own refresh schedule.
 2. The archive `Narrator` keeps a deduped pool, ranks them (score + recency + a
-   diversity penalty so the same kind doesn't dominate), and emits one item
-   at a time over SSE.
-3. The new item spawns as a card that **slides in from the left, right, or
-   top** and gently bobs in the air.
-4. The courier loop in `main.ts` looks at all floating cards, picks the one
-   nearest to dino, and tells him to walk over.
+   diversity penalty so the same kind doesn't dominate), and creates an active
+   server-owned card.
+3. Connected browsers receive `item_spawned` over `/realtime`. Each client
+   queues active cards locally and only spawns a few at a time so one dino
+   does not get overwhelmed.
+4. The courier loop in `main.ts` looks at floating cards, claims one over the
+   realtime socket, and tells the dino to walk over.
 5. Dino seeks → grabs → carries the card above his head → walks down to the
    bin matching that card's `kind` → drops it in.
-6. The bin's counter ticks up and bumps. Dino goes back to wandering until
-   the next card arrives.
+6. The client sends `deliver`; the server accepts the delivery, moves the card
+   into the shared archive, and broadcasts `item_delivered` so every browser
+   cancels any duplicate local work.
 
 While he has nothing to deliver, dino does his usual thing: walking,
 looking up, blinking, occasionally napping.

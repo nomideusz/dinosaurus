@@ -75,7 +75,7 @@ export interface FloatingMessage {
 }
 
 export interface MessageWorldOptions {
-  /** Maximum number of cards visible at once. New ones beyond this are dropped. */
+  /** Maximum number of cards visible at once. Extra realtime items wait in a local queue. */
   maxConcurrent?: number;
   /** Bottom padding (px) reserved for the bins row. */
   binsAreaHeight?: number;
@@ -98,6 +98,7 @@ export interface MessageWorldOptions {
 const ARCHIVE_TTL_MS = 2 * 60 * 60 * 1000;
 /** How often the client polls the server for items others have sorted. */
 const ARCHIVE_REFRESH_INTERVAL_MS = 60_000;
+const CARD_SPAWN_GAP_MS = 2_500;
 const ARCHIVE_API_URL =
   (import.meta.env.VITE_ARCHIVE_URL ?? "https://dinosaurus-archive-production.up.railway.app").replace(/\/$/, "");
 
@@ -113,8 +114,13 @@ export class MessageWorld {
   private readonly binsAreaHeight: number;
   private archiveOverlay: ArchiveOverlay | null = null;
   private nextRefreshAt = 0;
+  private nextSpawnAt = 0;
   private readonly onSpawn?: (item: ContentItem) => void;
   private archiveWarningShown = false;
+  private realtime: WebSocket | null = null;
+  private realtimeConnected = false;
+  private clientId: string | null = null;
+  private readonly pendingItems = new Map<string, ContentItem>();
 
   constructor(
     parent: HTMLElement,
@@ -127,7 +133,7 @@ export class MessageWorld {
     this.onSpawn = opts.onSpawn;
     this.worldW = worldW;
     this.worldH = worldH;
-    this.maxConcurrent = opts.maxConcurrent ?? 6;
+    this.maxConcurrent = opts.maxConcurrent ?? 3;
     this.binsAreaHeight = opts.binsAreaHeight ?? 88;
 
     injectStylesOnce();
@@ -172,9 +178,9 @@ export class MessageWorld {
       this.bins.push(bin);
     }
 
-    this.connectEventStream();
-    // SSE delivers an initial snapshot — pullArchive() is a fallback for the
-    // first paint in case EventSource is blocked / the network is flaky.
+    this.connectRealtime();
+    // The realtime connection delivers an initial snapshot. pullArchive() is a
+    // first-paint fallback for the archive counts while the socket connects.
     void this.pullArchive();
     this.relayoutBins();
   }
@@ -327,6 +333,7 @@ export class MessageWorld {
     if (!m || m.state !== "floating") return false;
     m.state = "claimed";
     m.el.classList.add("msg--claimed");
+    this.sendRealtime({ type: "claim", id });
     return true;
   }
 
@@ -348,6 +355,7 @@ export class MessageWorld {
     const m = this.messages.get(id);
     if (!m) return;
     if (m.state === "claimed" || m.state === "carried") {
+      this.sendRealtime({ type: "release", id });
       m.state = "floating";
       m.el.classList.remove("msg--claimed", "msg--carried");
     }
@@ -392,7 +400,8 @@ export class MessageWorld {
     bin.count = bin.delivered.length;
     bin.countEl.textContent = String(bin.count);
     if (this.archiveOverlay) this.archiveOverlay.refreshIfShowing(bin);
-    void this.pushDelivery(newItem);
+    if (this.realtimeConnected) this.sendRealtime({ type: "deliver", id: newItem.id });
+    else void this.pushDelivery(newItem);
     bumpBin(bin);
     return true;
   }
@@ -449,6 +458,7 @@ export class MessageWorld {
     for (const [id, m] of this.messages) {
       if (m.state === "gone") this.messages.delete(id);
     }
+    this.drainPending(now);
     // Periodically pull from the shared archive so this client sees items
     // other visitors' dinos have sorted, and so expired items disappear.
     if (now >= this.nextRefreshAt) {
@@ -479,13 +489,45 @@ export class MessageWorld {
     }
   }
 
+  private connectRealtime(): void {
+    if (!ARCHIVE_API_URL || typeof WebSocket === "undefined") {
+      this.connectEventStream();
+      return;
+    }
+    try {
+      const ws = new WebSocket(`${wsBaseUrl(ARCHIVE_API_URL)}/realtime`);
+      this.realtime = ws;
+      ws.addEventListener("open", () => {
+        this.realtimeConnected = true;
+        this.sendRealtime({ type: "hello" });
+      });
+      ws.addEventListener("message", (ev) => {
+        if (typeof ev.data === "string") this.dispatchServerEvent(ev.data);
+      });
+      ws.addEventListener("close", () => {
+        this.realtimeConnected = false;
+        this.clientId = null;
+        window.setTimeout(() => this.connectRealtime(), 3_000 + Math.random() * 2_000);
+      });
+      ws.addEventListener("error", () =>
+        this.warnArchiveSync("WebSocket /realtime failed; archive polling remains as fallback")
+      );
+    } catch (err) {
+      this.warnArchiveSync("WebSocket /realtime could not start", err);
+      this.connectEventStream();
+    }
+  }
+
+  private sendRealtime(data: unknown): void {
+    if (!this.realtimeConnected || !this.realtime || this.realtime.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    this.realtime.send(JSON.stringify(data));
+  }
+
   /**
-   * Subscribe to server-sent events so this client sees other visitors'
-   * deliveries instantly instead of waiting for the next 60s poll. The
-   * server sends typed deltas (`snapshot` / `add` / `expire`) so the
-   * per-event payload stays small even when the archive has hundreds of
-   * items. The browser auto-reconnects on transient drops; on persistent
-   * failure the periodic pullArchive() in update() keeps us current.
+   * Legacy SSE fallback. Realtime WebSocket is the authoritative path; this
+   * keeps older deployments and browsers from going completely quiet.
    */
   private connectEventStream(): void {
     if (!ARCHIVE_API_URL || typeof EventSource === "undefined") return;
@@ -507,26 +549,54 @@ export class MessageWorld {
       return;
     }
     if (!data || typeof data !== "object") return;
-    const obj = data as { type?: string; bins?: unknown; item?: unknown; ids?: unknown };
+    const obj = data as {
+      type?: string;
+      clientId?: unknown;
+      bins?: unknown;
+      active?: unknown;
+      item?: unknown;
+      id?: unknown;
+      ids?: unknown;
+      reason?: unknown;
+    };
     switch (obj.type) {
+      case "hello":
+        if (typeof obj.clientId === "string") this.clientId = obj.clientId;
+        return;
       case "snapshot":
         this.applySnapshot(obj.bins);
+        this.applyActiveItems(obj.active);
         return;
       case "add": {
         const item = sanitizeDeliveredItem(obj.item);
         if (item) this.applyAddedItem(item);
         return;
       }
+      case "item_spawned":
+      case "item":
+        this.enqueueItem(obj.item);
+        return;
+      case "item_claimed":
+        if (typeof obj.id === "string" && obj.clientId !== this.clientId) this.cullActiveItem(obj.id);
+        return;
+      case "item_released":
+        this.enqueueItem(obj.item);
+        return;
+      case "item_delivered": {
+        const item = sanitizeDeliveredItem(obj.item);
+        if (item) this.applyAddedItem(item);
+        return;
+      }
+      case "claim_rejected":
+      case "deliver_rejected":
+        if (typeof obj.id === "string") this.cullActiveItem(obj.id);
+        return;
       case "expire":
+      case "items_expired":
         if (Array.isArray(obj.ids)) {
           this.applyExpiredIds(obj.ids.filter((x): x is string => typeof x === "string"));
         }
         return;
-      case "item": {
-        const item = sanitizeContentItem(obj.item);
-        if (item) this.spawn(item);
-        return;
-      }
       default:
         // Pre-typed-event fallback (older server) — treat as raw snapshot.
         if (obj.bins) this.applySnapshot(obj.bins);
@@ -574,6 +644,46 @@ export class MessageWorld {
     );
   }
 
+  private enqueueItem(raw: unknown): void {
+    const item = sanitizeContentItem(raw);
+    if (!item) return;
+    if (!this.binFor(item.kind)) return;
+    if (this.messages.has(item.id) || this.pendingItems.has(item.id) || this.isInArchive(item.id)) {
+      return;
+    }
+    this.pendingItems.set(item.id, item);
+  }
+
+  private applyActiveItems(raw: unknown): void {
+    if (!Array.isArray(raw)) return;
+    for (const item of raw) this.enqueueItem(item);
+  }
+
+  private drainPending(now: number): void {
+    if (now < this.nextSpawnAt) return;
+    if (this.messages.size >= this.maxConcurrent) return;
+    for (const [id, item] of this.pendingItems) {
+      if (this.isInArchive(id) || !this.binFor(item.kind)) {
+        this.pendingItems.delete(id);
+        continue;
+      }
+      const spawned = this.spawn(item);
+      if (spawned) {
+        this.pendingItems.delete(id);
+        this.nextSpawnAt = now + CARD_SPAWN_GAP_MS;
+      }
+      return;
+    }
+  }
+
+  private cullActiveItem(id: string): void {
+    this.pendingItems.delete(id);
+    const msg = this.messages.get(id);
+    if (!msg || msg.state === "delivering" || msg.state === "gone") return;
+    msg.state = "gone";
+    msg.el.remove();
+  }
+
   /**
    * Apply a single delivery delta. Bumps the bin if the item is genuinely
    * new (not a re-delivery of an id already present), and culls any
@@ -590,18 +700,15 @@ export class MessageWorld {
     bin.countEl.textContent = String(bin.count);
     if (!wasPresent) bumpBin(bin);
     if (this.archiveOverlay) this.archiveOverlay.refreshIfShowing(bin);
-    // Cull a duplicate floating card if we have one — same rationale as in
-    // applySnapshot but targeted at this single id.
-    const dup = this.messages.get(item.id);
-    if (dup && (dup.state === "entering" || dup.state === "floating")) {
-      dup.state = "gone";
-      dup.el.remove();
-    }
+    // Server delivery is authoritative. If another client sorted this card
+    // while our dino was still approaching/carrying it, cancel our local copy.
+    this.cullActiveItem(item.id);
   }
 
   private applyExpiredIds(ids: string[]): void {
     if (ids.length === 0) return;
     const set = new Set(ids);
+    for (const id of set) this.cullActiveItem(id);
     for (const bin of this.bins) {
       const before = bin.delivered.length;
       bin.delivered = bin.delivered.filter((d) => !set.has(d.id));
@@ -628,17 +735,10 @@ export class MessageWorld {
       if (bin.count > before) bumpBin(bin);
       if (this.archiveOverlay) this.archiveOverlay.refreshIfShowing(bin);
     }
-    // If a refresh reveals that something currently floating is already in
-    // the shared archive (delivered by another visitor's dino), quietly cull
-    // it so we don't ask our dino to do the same work for no count change.
-    // We only touch idle states — claimed/carried/delivering items keep
-    // playing out their animation to avoid visual jank.
+    // If a refresh reveals that something currently active is already in the
+    // shared archive, server/archive state wins and the local task is canceled.
     for (const m of [...this.messages.values()]) {
-      if (m.state !== "entering" && m.state !== "floating") continue;
-      if (this.isInArchive(m.id)) {
-        m.state = "gone";
-        m.el.remove();
-      }
+      if (this.isInArchive(m.id)) this.cullActiveItem(m.id);
     }
   }
 
@@ -895,6 +995,12 @@ function escapeHtml(s: string): string {
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
+}
+
+function wsBaseUrl(httpBase: string): string {
+  const url = new URL(httpBase);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  return url.toString().replace(/\/$/, "");
 }
 
 let stylesInjected = false;

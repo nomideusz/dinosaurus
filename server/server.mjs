@@ -7,6 +7,7 @@
 // No database — the data is intentionally ephemeral. A redeploy clears it,
 // which is fine for a 2-hour rolling window.
 
+import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 
 import { Narrator } from "./narrator.mjs";
@@ -21,6 +22,9 @@ const PORT = Number(process.env.PORT ?? 8080);
 const ARCHIVE_TTL_MS = 2 * 60 * 60 * 1000;
 /** Hard cap per kind so a misbehaving client can't blow up memory. */
 const MAX_PER_KIND = 200;
+const ACTIVE_ITEM_TTL_MS = 5 * 60_000;
+const CLAIM_LEASE_MS = 45_000;
+const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const ALLOWED_KINDS = new Set([
   "news",
   "weather",
@@ -52,8 +56,14 @@ const ALLOWED_ORIGINS = new Set(
 /** @type {Map<string, Array<{ id: string, kind: string, text: string, href?: string, linkLabel?: string, deliveredAt: number }>>} */
 const bins = new Map();
 
+/** @type {Map<string, { id: string, kind: string, text: string, href?: string, linkLabel?: string, publishedAt: number, score: number, spawnedAt: number, claimedBy?: string, claimUntil?: number }>} */
+const activeItems = new Map();
+
 /** @type {Set<{ res: import("node:http").ServerResponse, hb: NodeJS.Timeout }>} */
 const sseClients = new Set();
+
+/** @type {Set<{ id: string, socket: import("node:net").Socket, buffer: Buffer }>} */
+const wsClients = new Set();
 
 function totalCount() {
   let n = 0;
@@ -75,7 +85,31 @@ function snapshot() {
   /** @type {Record<string, unknown[]>} */
   const out = {};
   for (const [kind, list] of bins) out[kind] = list;
-  return { bins: out, ttlMs: ARCHIVE_TTL_MS };
+  return { bins: out, active: [...activeItems.values()].map(publicActiveItem), ttlMs: ARCHIVE_TTL_MS };
+}
+
+function publicActiveItem(item) {
+  const { claimedBy, claimUntil, ...rest } = item;
+  return rest;
+}
+
+function isKnown(id) {
+  if (activeItems.has(id)) return true;
+  for (const list of bins.values()) {
+    for (const it of list) if (it.id === id) return true;
+  }
+  return false;
+}
+
+function addDeliveredItem(item) {
+  const list = bins.get(item.kind) ?? [];
+  const filtered = list.filter((d) => d.id !== item.id);
+  filtered.unshift(item);
+  if (filtered.length > MAX_PER_KIND) filtered.length = MAX_PER_KIND;
+  bins.set(item.kind, filtered);
+  activeItems.delete(item.id);
+  broadcastEvent({ type: "add", item });
+  broadcastRealtime({ type: "item_delivered", item });
 }
 
 /**
@@ -97,11 +131,86 @@ function broadcastEvent(event) {
   }
 }
 
+function sendRealtime(client, event) {
+  if (client.socket.destroyed) return;
+  try {
+    client.socket.write(encodeWsText(JSON.stringify(event)));
+  } catch {
+    wsClients.delete(client);
+  }
+}
+
+function broadcastRealtime(event) {
+  for (const client of wsClients) sendRealtime(client, event);
+}
+
+function encodeWsText(text) {
+  const body = Buffer.from(text);
+  let header;
+  if (body.length < 126) {
+    header = Buffer.from([0x81, body.length]);
+  } else if (body.length < 65_536) {
+    header = Buffer.alloc(4);
+    header[0] = 0x81;
+    header[1] = 126;
+    header.writeUInt16BE(body.length, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x81;
+    header[1] = 127;
+    header.writeBigUInt64BE(BigInt(body.length), 2);
+  }
+  return Buffer.concat([header, body]);
+}
+
+function decodeWsFrames(client) {
+  const messages = [];
+  while (client.buffer.length >= 2) {
+    const first = client.buffer[0];
+    const second = client.buffer[1];
+    const opcode = first & 0x0f;
+    const masked = (second & 0x80) !== 0;
+    let length = second & 0x7f;
+    let offset = 2;
+    if (length === 126) {
+      if (client.buffer.length < offset + 2) break;
+      length = client.buffer.readUInt16BE(offset);
+      offset += 2;
+    } else if (length === 127) {
+      if (client.buffer.length < offset + 8) break;
+      const big = client.buffer.readBigUInt64BE(offset);
+      if (big > BigInt(Number.MAX_SAFE_INTEGER)) {
+        client.socket.destroy();
+        return messages;
+      }
+      length = Number(big);
+      offset += 8;
+    }
+    if (!masked) {
+      client.socket.destroy();
+      return messages;
+    }
+    if (client.buffer.length < offset + 4 + length) break;
+    const mask = client.buffer.subarray(offset, offset + 4);
+    offset += 4;
+    const payload = Buffer.from(client.buffer.subarray(offset, offset + length));
+    client.buffer = client.buffer.subarray(offset + length);
+    for (let i = 0; i < payload.length; i += 1) payload[i] ^= mask[i % 4];
+    if (opcode === 0x8) {
+      client.socket.end(Buffer.from([0x88, 0x00]));
+      return messages;
+    }
+    if (opcode === 0x1) messages.push(payload.toString("utf-8"));
+  }
+  return messages;
+}
+
 // Drain expired items so connected clients see them disappear in real time
 // without waiting for the next read. We also broadcast the *ids* that left
 // so clients can patch their state without reloading the whole archive.
 setInterval(() => {
-  const cutoff = Date.now() - ARCHIVE_TTL_MS;
+  const now = Date.now();
+  const cutoff = now - ARCHIVE_TTL_MS;
   /** @type {string[]} */
   const expired = [];
   for (const [kind, list] of bins) {
@@ -117,6 +226,25 @@ setInterval(() => {
   }
   if (expired.length > 0) {
     broadcastEvent({ type: "expire", ids: expired });
+    broadcastRealtime({ type: "items_expired", ids: expired });
+  }
+
+  /** @type {string[]} */
+  const activeExpired = [];
+  for (const [id, item] of activeItems) {
+    if (item.claimUntil && item.claimUntil <= now) {
+      delete item.claimedBy;
+      delete item.claimUntil;
+      broadcastRealtime({ type: "item_released", id, item: publicActiveItem(item) });
+    }
+    if (now - item.spawnedAt >= ACTIVE_ITEM_TTL_MS) {
+      activeItems.delete(id);
+      activeExpired.push(id);
+    }
+  }
+  if (activeExpired.length > 0) {
+    broadcastEvent({ type: "expire", ids: activeExpired });
+    broadcastRealtime({ type: "items_expired", ids: activeExpired });
   }
 }, 60_000).unref();
 
@@ -233,16 +361,10 @@ const server = createServer(async (req, res) => {
         sendJson(req, res, 400, { error: "invalid item" });
         return;
       }
-      const list = bins.get(item.kind) ?? [];
-      // Replace any existing entry for this id so re-deliveries refresh.
-      const filtered = list.filter((d) => d.id !== item.id);
-      filtered.unshift(item);
-      if (filtered.length > MAX_PER_KIND) filtered.length = MAX_PER_KIND;
-      bins.set(item.kind, filtered);
+      addDeliveredItem(item);
       // The POSTing client already updated its own state optimistically; we
       // still send back a small ack so it knows the canonical timestamp.
       sendJson(req, res, 200, { ok: true, item });
-      broadcastEvent({ type: "add", item });
       return;
     }
 
@@ -253,6 +375,148 @@ const server = createServer(async (req, res) => {
   }
 });
 
+server.on("upgrade", (req, socket, head) => {
+  try {
+    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    const origin = req.headers.origin;
+    if (url.pathname !== "/realtime") {
+      socket.destroy();
+      return;
+    }
+    if (typeof origin === "string" && !ALLOWED_ORIGINS.has(origin)) {
+      socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    const key = req.headers["sec-websocket-key"];
+    if (typeof key !== "string") {
+      socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    const accept = createHash("sha1").update(key + WS_GUID).digest("base64");
+    socket.write(
+      [
+        "HTTP/1.1 101 Switching Protocols",
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        `Sec-WebSocket-Accept: ${accept}`,
+        "\r\n",
+      ].join("\r\n")
+    );
+
+    const client = { id: randomUUID(), socket, buffer: Buffer.from(head ?? []) };
+    wsClients.add(client);
+    sendRealtime(client, { type: "hello", clientId: client.id });
+    const snap = snapshot();
+    sendRealtime(client, {
+      type: "snapshot",
+      bins: snap.bins,
+      active: snap.active,
+      ttlMs: snap.ttlMs,
+    });
+    if (client.buffer.length > 0) {
+      for (const raw of decodeWsFrames(client)) handleRealtimeMessage(client, raw);
+    }
+
+    socket.on("data", (chunk) => {
+      client.buffer = Buffer.concat([client.buffer, chunk]);
+      for (const raw of decodeWsFrames(client)) handleRealtimeMessage(client, raw);
+    });
+    socket.on("close", () => removeRealtimeClient(client));
+    socket.on("error", () => removeRealtimeClient(client));
+  } catch {
+    socket.destroy();
+  }
+});
+
+function removeRealtimeClient(client) {
+  if (!wsClients.delete(client)) return;
+  for (const item of activeItems.values()) {
+    if (item.claimedBy === client.id) {
+      delete item.claimedBy;
+      delete item.claimUntil;
+      broadcastRealtime({ type: "item_released", id: item.id, item: publicActiveItem(item) });
+    }
+  }
+}
+
+function handleRealtimeMessage(client, raw) {
+  let msg;
+  try {
+    msg = JSON.parse(raw);
+  } catch {
+    sendRealtime(client, { type: "error", error: "invalid_json" });
+    return;
+  }
+  if (!msg || typeof msg !== "object") return;
+  switch (msg.type) {
+    case "hello":
+      sendRealtime(client, {
+        type: "snapshot",
+        ...snapshot(),
+      });
+      return;
+    case "claim":
+      handleClaim(client, msg.id);
+      return;
+    case "release":
+      handleRelease(client, msg.id);
+      return;
+    case "deliver":
+      handleDeliver(client, msg.id);
+      return;
+  }
+}
+
+function handleClaim(client, id) {
+  if (typeof id !== "string") return;
+  const item = activeItems.get(id);
+  const now = Date.now();
+  if (!item) {
+    sendRealtime(client, { type: "claim_rejected", id, reason: "missing" });
+    return;
+  }
+  if (item.claimedBy && item.claimedBy !== client.id && (item.claimUntil ?? 0) > now) {
+    sendRealtime(client, { type: "claim_rejected", id, reason: "claimed" });
+    return;
+  }
+  item.claimedBy = client.id;
+  item.claimUntil = now + CLAIM_LEASE_MS;
+  sendRealtime(client, { type: "claim_accepted", id, leaseUntil: item.claimUntil });
+  broadcastRealtime({ type: "item_claimed", id, clientId: client.id, leaseUntil: item.claimUntil });
+}
+
+function handleRelease(client, id) {
+  if (typeof id !== "string") return;
+  const item = activeItems.get(id);
+  if (!item || item.claimedBy !== client.id) return;
+  delete item.claimedBy;
+  delete item.claimUntil;
+      broadcastRealtime({ type: "item_released", id, item: publicActiveItem(item) });
+}
+
+function handleDeliver(client, id) {
+  if (typeof id !== "string") return;
+  const item = activeItems.get(id);
+  if (!item) {
+    sendRealtime(client, { type: "deliver_rejected", id, reason: "missing" });
+    return;
+  }
+  if (item.claimedBy && item.claimedBy !== client.id && (item.claimUntil ?? 0) > Date.now()) {
+    sendRealtime(client, { type: "deliver_rejected", id, reason: "claimed" });
+    return;
+  }
+  addDeliveredItem({
+    id: item.id,
+    kind: item.kind,
+    text: item.text,
+    href: item.href,
+    linkLabel: item.linkLabel,
+    deliveredAt: Date.now(),
+  });
+}
+
 server.listen(PORT, () => {
   console.log(`[archive] listening on :${PORT} (TTL ${ARCHIVE_TTL_MS}ms)`);
 });
@@ -261,15 +525,13 @@ server.listen(PORT, () => {
 // independently; now the server polls once and pushes new items as they're
 // chosen, so upstream APIs see ~1 set of requests instead of N.
 const narrator = new Narrator({
-  cadenceMs: 9_000,
-  isAlreadyKnown: (id) => {
-    for (const list of bins.values()) {
-      for (const it of list) if (it.id === id) return true;
-    }
-    return false;
-  },
+  cadenceMs: 16_000,
+  isAlreadyKnown: isKnown,
   onItem: (item) => {
+    if (isKnown(item.id)) return;
+    activeItems.set(item.id, { ...item, spawnedAt: Date.now() });
     broadcastEvent({ type: "item", item });
+    broadcastRealtime({ type: "item_spawned", item });
   },
   logger: console,
 });
