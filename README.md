@@ -90,9 +90,12 @@ forwards `Range` headers so the audio element can seek.
 
 Per-channel playlists are hand-curated in Navidrome's UI. The
 `POST /admin/refresh-playlists` endpoint (auth via `X-Admin-Token`) mirrors
-the entire library into the `all` playlist; the runtime picker falls back to
-`all` whenever a per-channel playlist is missing or empty, so unmanaged
-channels still play music.
+the entire library into the `all` playlist and ensures an empty shell exists
+for every per-channel playlist matching a category bin (`news`, `quakes`,
+`facts`, `thoughts`, `space`, `birds`). Existing per-channel contents are
+never touched — only the names are guaranteed to be present so you have
+ready destinations to drag tracks into. The runtime picker falls back to
+`all` whenever a per-channel playlist is missing or empty.
 
 ## What's inside
 

@@ -773,11 +773,43 @@ async function syncOnePlaylist(name, libIds) {
 }
 
 /**
- * Sync the radio's `all` playlist to mirror the entire Navidrome library.
- * Per-channel playlists (news, quakes, facts, thoughts, space, birds) are
- * curated by hand in Navidrome — we don't touch them. The radio's runtime
- * picker falls back to `all` whenever a per-channel playlist is missing or
- * empty, so unmanaged channels still play music.
+ * Per-channel playlist names, derived from the category bins so the
+ * Navidrome side always mirrors the dino's bins. "all" is the synced
+ * catch-all; the rest are user-curated shells we ensure exist.
+ */
+const PER_CHANNEL_PLAYLISTS = Object.values(RADIO_PLAYLIST).filter((n) => n !== "all");
+
+/**
+ * Ensure an empty playlist with `name` exists. If it already exists, leave
+ * its contents alone; we only manage the shell so the user has a
+ * destination to drag tracks into in the Navidrome UI.
+ */
+async function ensureEmptyPlaylist(name) {
+  const playlists = await getAllPlaylists();
+  const existing = findPlaylistByName(playlists, name);
+  if (existing) {
+    return { name, action: "exists", playlistId: String(existing.id) };
+  }
+  // Subsonic createPlaylist.view accepts `name` alone — songId is optional.
+  const created = await subsonicJson("createPlaylist.view", { name });
+  let playlistId = created?.playlist?.id ? String(created.playlist.id) : null;
+  if (!playlistId) {
+    invalidatePlaylistCaches();
+    const refreshed = await getAllPlaylists();
+    const found = findPlaylistByName(refreshed, name);
+    playlistId = found?.id ? String(found.id) : null;
+  }
+  if (!playlistId) throw new Error(`created '${name}' but couldn't find its id`);
+  return { name, action: "created", playlistId };
+}
+
+/**
+ * Sync the radio's `all` playlist to mirror the entire Navidrome library
+ * and ensure an empty shell exists for every per-channel playlist that
+ * matches a category bin. Existing per-channel playlists are left alone
+ * so user-curated contents are never overwritten — only the names are
+ * guaranteed to exist. The runtime picker falls back to `all` whenever a
+ * per-channel playlist is missing or empty.
  */
 async function syncRadioPlaylists() {
   const ids = await searchAllSongIds();
@@ -786,18 +818,25 @@ async function syncRadioPlaylists() {
   }
 
   invalidatePlaylistCaches();
-  let result;
+  const playlists = [];
   try {
-    result = await syncOnePlaylist("all", ids);
+    playlists.push(await syncOnePlaylist("all", ids));
   } catch (err) {
-    result = { name: "all", error: err.message };
+    playlists.push({ name: "all", error: err.message });
+  }
+  for (const name of PER_CHANNEL_PLAYLISTS) {
+    try {
+      playlists.push(await ensureEmptyPlaylist(name));
+    } catch (err) {
+      playlists.push({ name, error: err.message });
+    }
   }
   invalidatePlaylistCaches();
 
   return {
-    ok: !result.error,
+    ok: playlists.every((p) => !p.error),
     songCount: ids.length,
-    playlists: [result],
+    playlists,
   };
 }
 
