@@ -6,12 +6,15 @@ thoughts — slide in from the edges as floating cards. Dino's job is to walk
 over, grab each one, and drag it down to the matching category bin at the
 bottom of the page.
 
-Built with **Vite + TypeScript**, no images and no API keys. Production runs as
-two small services:
+Built with **Vite + TypeScript**, no bundled images, and any API keys it
+needs stay server-side. Production runs as three Railway services:
 
 - `dinosaurus-frontend`: the static Vite app served by `static-server.mjs`.
-- `dinosaurus-archive`: an in-memory 2-hour shared archive plus an
-  authoritative WebSocket realtime endpoint, served from `server/server.mjs`.
+- `dinosaurus-archive`: an in-memory 24-hour shared archive plus an
+  authoritative WebSocket realtime endpoint and the radio proxy, served
+  from `server/server.mjs`.
+- `dinosaurus-navidrome`: a custom Navidrome + Syncthing image
+  (`navidrome/Dockerfile`) that hosts the music library on a shared volume.
 
 ## Quick start
 
@@ -48,6 +51,22 @@ Archive runtime variables:
 - `ALLOWED_ORIGINS`: comma-separated browser origins allowed to call
   `/archive` and `/events`, for example
   `https://dino.zaur.app,http://localhost:5173,http://localhost:5174,http://localhost:4173`.
+- `ARCHIVE_PERSIST_PATH`: optional snapshot path (e.g. `/data/bins.json` on a
+  Railway volume) so the 24-hour archive survives redeploys. Unset = in-memory
+  only.
+- `NAVIDROME_URL`, `NAVIDROME_USER`, `NAVIDROME_PASSWORD`: credentials for the
+  radio. Unset disables `/radio/*`.
+- `ADMIN_TOKEN`: shared secret for `/admin/refresh-playlists`. Empty disables
+  admin endpoints entirely.
+- `ANTHROPIC_API_KEY`: optional; enables the `musings` source (Claude Haiku
+  generates dino thoughts ~once an hour). Without it the source is skipped.
+
+Navidrome service runtime variables (the bundled image):
+
+- `ND_PORT`, `ND_MUSICFOLDER`, `ND_DATAFOLDER`: standard Navidrome — all paths
+  live on the shared Railway volume.
+- `SYNCTHING_USER` (default `admin`), `SYNCTHING_PASSWORD`: required on first
+  boot to seed the Syncthing GUI on `:8384` with bcrypted credentials.
 
 The frontend reads `VITE_ARCHIVE_URL` at build time, so changing it requires a
 new frontend build/deploy. The client connects to `${VITE_ARCHIVE_URL}/realtime`
@@ -57,14 +76,23 @@ console warning pointing at these variables.
 
 ## Dino radio
 
-Phase 1 is a minimal control strip, not an audio player. The user can pick a
-channel (`all`, `news`, `quakes`, `facts`, `thoughts`) and a pace
-(`chill`, `normal`, `busy`). Preferences are anonymous, saved in
-`localStorage`, and sent to `/realtime` for the current socket only.
+The bottom-of-page strip is a working audio player that streams tracks from a
+Navidrome library. The user picks a channel (`all`, `news`, `quakes`, `facts`,
+`thoughts`, `space`, `birds`) and a pace (`chill`, `normal`, `busy`).
+Preferences are anonymous, saved in `localStorage`, and sent to `/realtime`
+for the current socket only. Pace also throttles how cards spawn so the dino
+never gets overwhelmed.
 
-The server filters active cards per client preference; the client also keeps a
-small local queue and spaces card spawns based on the selected pace. Future
-audio can build on the same channel state after a user gesture enables sound.
+Audio flows through the archive server: the client calls `/radio/track` for
+the next track id, then `/radio/stream/<id>` to play the bytes. The archive
+proxies Subsonic so Navidrome credentials never reach the browser, and
+forwards `Range` headers so the audio element can seek.
+
+Per-channel playlists are hand-curated in Navidrome's UI. The
+`POST /admin/refresh-playlists` endpoint (auth via `X-Admin-Token`) mirrors
+the entire library into the `all` playlist; the runtime picker falls back to
+`all` whenever a per-channel playlist is missing or empty, so unmanaged
+channels still play music.
 
 ## What's inside
 
@@ -80,9 +108,13 @@ src/
     └── content.ts     # shared ContentItem types
 
 server/
-├── server.mjs         # archive API, WebSocket authority, CORS, health check
+├── server.mjs         # archive API, WebSocket authority, radio proxy, admin
 ├── narrator.mjs       # server-side source scheduler and item picker
-└── sources/           # HN, DEV.to, quakes, facts, musings
+└── sources/           # HN, DEV.to, quakes, facts, musings, space, birds
+
+navidrome/
+├── Dockerfile         # Navidrome + Syncthing combined image
+└── entrypoint.sh      # boots Syncthing in the background and Navidrome up front
 ```
 
 ## How a message gets sorted
@@ -135,9 +167,14 @@ his own, mixed in with everything else.
 
 ## Credits
 
-- News: [Hacker News API](https://github.com/HackerNews/API)
+- News: [Hacker News API](https://github.com/HackerNews/API) and [DEV.to](https://dev.to/api)
 - Weather: [Open-Meteo](https://open-meteo.com/) (no API key required)
 - Approximate location: [ipapi.co](https://ipapi.co/) (falls back to London)
+- Earthquakes: [USGS](https://earthquake.usgs.gov/fdsnws/event/1/) feed
+- Space: [NASA APOD](https://api.nasa.gov/) and the asteroid feed
+- Birds: [eBird](https://documenter.getpostman.com/view/664302/S1ENwy59) recent observations
+- Musings: [Anthropic Claude](https://www.anthropic.com/) (Haiku) — optional
+- Radio: [Navidrome](https://www.navidrome.org/) + [Syncthing](https://syncthing.net/)
 
 ## License
 
