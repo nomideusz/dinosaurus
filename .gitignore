@@ -5,6 +5,7 @@ dist
 .vite
 .env
 .env.local
+.claude/
 
 # Radio audio is hosted out-of-band (local files / Railway volume / object
 # storage) — never committed. The vite plugin in vite.config.ts builds a
