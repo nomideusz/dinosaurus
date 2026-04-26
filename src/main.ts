@@ -1,7 +1,7 @@
 // Entry point. Sets up the canvas + DPR scaling, builds the world and the
 // dino, and runs the main animation loop.
 //
-// Content (HN, DEV.to, weather, quakes, history, facts, musings) is fetched
+// Content (HN, DEV.to, weather, quakes, facts, musings) is fetched
 // and ranked on the server. The client just listens for "item" SSE events
 // and spawns a floating card for each; the courier loop then walks the dino
 // over to grab and deliver them.
@@ -60,7 +60,6 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
     [
       { kind: "news", label: "news", icon: "▤" },
       { kind: "quake", label: "quakes", icon: "↯" },
-      { kind: "history", label: "history", icon: "⧗" },
       { kind: "fact", label: "facts", icon: "❍" },
       { kind: "thought", label: "thoughts", icon: "✦" },
       { kind: "space", label: "space", icon: "☄" },
@@ -266,8 +265,6 @@ function deliveryMoodFor(kind: ContentKind): Mood {
       return "happy";
     case "quake":
       return "angry"; // the earth shaking is alarming
-    case "history":
-      return "curious";
     case "space":
       return "surprised"; // a small "wow" — looks up
     case "bird":

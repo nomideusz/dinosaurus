@@ -114,7 +114,7 @@ const PATTERN_BUFFER_MAX = 32;
 const PATTERN_MIN_ITEMS = 5;
 const PATTERN_MIN_DOC_COUNT = 3;
 const RADIO_STORAGE_KEY = "dinosaurus.radio.v1";
-const RADIO_CHANNELS = ["news", "quake", "history", "fact", "thought", "space", "bird"] as const;
+const RADIO_CHANNELS = ["news", "quake", "fact", "thought", "space", "bird"] as const;
 type RadioChannel = "all" | (typeof RADIO_CHANNELS)[number];
 
 /**
@@ -126,7 +126,6 @@ const RADIO_FOLDER: Record<RadioChannel, string> = {
   all: "all",
   news: "news",
   quake: "quakes",
-  history: "history",
   fact: "facts",
   thought: "thoughts",
   space: "space",
@@ -670,7 +669,6 @@ export class MessageWorld {
       { value: "all", label: "all" },
       { value: "news", label: "news" },
       { value: "quake", label: "quakes" },
-      { value: "history", label: "history" },
       { value: "fact", label: "facts" },
       { value: "thought", label: "thoughts" },
       { value: "space", label: "space" },
@@ -1469,8 +1467,6 @@ function kindLabel(kind: ContentKind): string {
       return "thought";
     case "quake":
       return "quake";
-    case "history":
-      return "history";
     case "space":
       return "space";
     case "bird":
@@ -1490,8 +1486,6 @@ function kindIcon(kind: ContentKind): string {
       return "✦";
     case "quake":
       return "↯";
-    case "history":
-      return "⧗";
     case "space":
       return "☄";
     case "bird":
@@ -1506,8 +1500,6 @@ function stampLabelFor(kind: ContentKind): string {
       return "hn";
     case "quake":
       return "usgs";
-    case "history":
-      return "on this day";
     case "fact":
       return "field note";
     case "thought":
@@ -1954,8 +1946,6 @@ function channelFrequency(channel: RadioChannel): number {
       return 132;
     case "quake":
       return 98;
-    case "history":
-      return 116;
     case "fact":
       return 148;
     case "thought":
@@ -1980,8 +1970,6 @@ function channelScale(channel: RadioChannel): number[] {
       return [root, root * 1.25, root * 1.5, root * 2, root * 1.5, root * 1.25];
     case "quake":
       return [root, root * 1.2, root * 1.33, root * 1.6, root * 1.33, root * 1.2];
-    case "history":
-      return [root, root * 1.125, root * 1.5, root * 1.875, root * 1.5, root * 1.125];
     case "fact":
       return [root, root * 1.25, root * 1.5, root * 1.875, root * 1.5, root * 1.25];
     case "thought":
@@ -2169,7 +2157,6 @@ function injectStylesOnce(): void {
     .msg--fact    { --accent: #8dd9a8; }
     .msg--thought { --accent: #c8a8ff; }
     .msg--quake   { --accent: #f3c969; }
-    .msg--history { --accent: #d4a574; }
     .msg--space   { --accent: #9eb5ff; }
     .msg--bird    { --accent: #e0a8c0; }
     .msg .msg__tag { background: var(--accent, var(--ink, #e8e4d8)); }
@@ -2431,7 +2418,6 @@ function injectStylesOnce(): void {
     .bin--fact    { --accent: #8dd9a8; }
     .bin--thought { --accent: #c8a8ff; }
     .bin--quake   { --accent: #f3c969; }
-    .bin--history { --accent: #d4a574; }
     .bin--space   { --accent: #9eb5ff; }
     .bin--bird    { --accent: #e0a8c0; }
     .bin:hover { border-color: var(--accent, var(--ink-soft, #8a8678)); }
@@ -2477,7 +2463,6 @@ function injectStylesOnce(): void {
     .archive-panel[data-kind="fact"]    { --accent: #8dd9a8; border-top: 4px solid var(--accent); }
     .archive-panel[data-kind="thought"] { --accent: #c8a8ff; border-top: 4px solid var(--accent); }
     .archive-panel[data-kind="quake"]   { --accent: #f3c969; border-top: 4px solid var(--accent); }
-    .archive-panel[data-kind="history"] { --accent: #d4a574; border-top: 4px solid var(--accent); }
     .archive-panel[data-kind="space"]   { --accent: #9eb5ff; border-top: 4px solid var(--accent); }
     .archive-panel[data-kind="bird"]    { --accent: #e0a8c0; border-top: 4px solid var(--accent); }
 

@@ -18,7 +18,6 @@ import { createBirds } from "./sources/birds.mjs";
 import { DevTo } from "./sources/devto.mjs";
 import { Facts } from "./sources/facts.mjs";
 import { HackerNews } from "./sources/hn.mjs";
-import { History } from "./sources/history.mjs";
 import { createMusings } from "./sources/musings.mjs";
 import { Quakes } from "./sources/quakes.mjs";
 import { Space } from "./sources/space.mjs";
@@ -45,11 +44,10 @@ const ALLOWED_KINDS = new Set([
   "fact",
   "thought",
   "quake",
-  "history",
   "space",
   "bird",
 ]);
-const DEFAULT_CHANNELS = ["news", "fact", "thought", "quake", "history", "space", "bird"];
+const DEFAULT_CHANNELS = ["news", "fact", "thought", "quake", "space", "bird"];
 const PACES = new Set(["chill", "normal", "busy"]);
 
 /**
@@ -464,7 +462,6 @@ const RADIO_PLAYLIST = {
   all: "all",
   news: "news",
   quake: "quakes",
-  history: "history",
   fact: "facts",
   thought: "thoughts",
   space: "space",
@@ -703,11 +700,11 @@ async function searchAllSongs() {
 }
 
 /**
- * The eight playlist names the radio looks up by RADIO_PLAYLIST. Files are
+ * The seven playlist names the radio looks up by RADIO_PLAYLIST. Files are
  * routed to a per-channel playlist when their leading path segment matches
  * a name here (case-insensitive). Every song also lands in `all`.
  */
-const SYNCABLE_PLAYLISTS = ["all", "news", "quakes", "history", "facts", "thoughts", "space", "birds"];
+const SYNCABLE_PLAYLISTS = ["all", "news", "quakes", "facts", "thoughts", "space", "birds"];
 
 /**
  * Resolve (or create) a playlist by name and reduce its contents to exactly
@@ -1218,7 +1215,6 @@ const narrator = new Narrator({
 narrator.registerSource(HackerNews);
 narrator.registerSource(DevTo);
 narrator.registerSource(Quakes);
-narrator.registerSource(History);
 narrator.registerSource(Facts);
 narrator.registerSource(
   createMusings({

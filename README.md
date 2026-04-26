@@ -58,7 +58,7 @@ console warning pointing at these variables.
 ## Dino radio
 
 Phase 1 is a minimal control strip, not an audio player. The user can pick a
-channel (`all`, `news`, `quakes`, `history`, `facts`, `thoughts`) and a pace
+channel (`all`, `news`, `quakes`, `facts`, `thoughts`) and a pace
 (`chill`, `normal`, `busy`). Preferences are anonymous, saved in
 `localStorage`, and sent to `/realtime` for the current socket only.
 
@@ -82,7 +82,7 @@ src/
 server/
 ├── server.mjs         # archive API, WebSocket authority, CORS, health check
 ├── narrator.mjs       # server-side source scheduler and item picker
-└── sources/           # HN, DEV.to, quakes, history, facts, musings
+└── sources/           # HN, DEV.to, quakes, facts, musings
 ```
 
 ## How a message gets sorted

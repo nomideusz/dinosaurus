@@ -8,7 +8,6 @@ export type ContentKind =
   | "fact"
   | "thought"
   | "quake"
-  | "history"
   | "space"
   | "bird";
 
