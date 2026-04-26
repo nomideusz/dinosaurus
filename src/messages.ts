@@ -2629,6 +2629,32 @@ function injectStylesOnce(): void {
       text-align: center;
     }
 
+    @media (max-width: 600px) {
+      .msg {
+        width: clamp(150px, 56vw, 190px);
+        padding: 11px 11px 8px;
+        font-size: 11px;
+      }
+      .msg__tag { font-size: 9px; padding: 2px 6px; top: -9px; left: 10px; }
+      .msg__stamp { font-size: 9.5px; margin-top: 6px; }
+
+      .bin-row {
+        bottom: 14px;
+        gap: 5px;
+        padding: 0 10px;
+      }
+      .bin {
+        flex: 0 0 76px;
+        padding: 6px 7px 18px;
+        font-size: 9.5px;
+      }
+      .bin__icon { font-size: 11px; }
+      .bin__count { font-size: 9px; }
+      .bin__label { font-size: 7.5px; letter-spacing: 0.06em; margin-top: 2px; }
+      .bin__lid { left: 6px; right: 6px; bottom: 5px; height: 11px; }
+      .bin__slot { width: 24px; top: 3px; }
+    }
+
     @media (prefers-reduced-motion: reduce) {
       .msg, .bin { transition: opacity 180ms ease; }
       .bin--bump { animation: none; }
