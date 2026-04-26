@@ -670,13 +670,14 @@ function invalidatePlaylistCaches() {
 }
 
 /**
- * Page through Subsonic's search3 to enumerate every song in the library.
- * Empty query returns all songs in Navidrome; we keep paging until a partial
- * page tells us we've reached the end.
+ * Page through Subsonic's search3 to enumerate every song in the library,
+ * including the file path so we can bucket by leading folder. Empty query
+ * returns all songs in Navidrome; we keep paging until a partial page tells
+ * us we've reached the end.
  */
-async function searchAllSongIds() {
+async function searchAllSongs() {
   const PAGE = 500;
-  const ids = [];
+  const songs = [];
   let offset = 0;
   // Cap iterations so a misbehaving server can't loop us forever.
   for (let i = 0; i < 200; i++) {
@@ -687,31 +688,36 @@ async function searchAllSongIds() {
       artistCount: 0,
       albumCount: 0,
     });
-    const songs = sub?.searchResult3?.song ?? [];
-    for (const s of songs) {
-      if (s?.id != null) ids.push(String(s.id));
+    const list = sub?.searchResult3?.song ?? [];
+    for (const s of list) {
+      if (s?.id == null) continue;
+      songs.push({
+        id: String(s.id),
+        path: typeof s.path === "string" ? s.path : "",
+      });
     }
-    if (songs.length < PAGE) break;
+    if (list.length < PAGE) break;
     offset += PAGE;
   }
-  return ids;
+  return songs;
 }
 
 /**
- * Bring the "all" playlist into agreement with the current library — every
- * song in the library appears in the playlist exactly once. Diffs against
- * the existing playlist so we only touch what changed (cheap to re-run).
+ * The eight playlist names the radio looks up by RADIO_PLAYLIST. Files are
+ * routed to a per-channel playlist when their leading path segment matches
+ * a name here (case-insensitive). Every song also lands in `all`.
  */
-async function syncAllPlaylist() {
-  const libIds = await searchAllSongIds();
-  if (libIds.length === 0) {
-    return { action: "noop", reason: "library empty", songCount: 0 };
-  }
+const SYNCABLE_PLAYLISTS = ["all", "news", "quakes", "history", "facts", "thoughts", "space", "birds"];
 
-  invalidatePlaylistCaches();
+/**
+ * Resolve (or create) a playlist by name and reduce its contents to exactly
+ * `libIds` via chunked updatePlaylist add/remove. Returns the diff stats.
+ */
+async function syncOnePlaylist(name, libIds) {
+  const lower = name.toLowerCase();
   const playlists = await getAllPlaylists();
   const existing = playlists.find(
-    (p) => typeof p?.name === "string" && p.name.toLowerCase() === "all"
+    (p) => typeof p?.name === "string" && p.name.toLowerCase() === lower
   );
 
   let playlistId;
@@ -719,25 +725,25 @@ async function syncAllPlaylist() {
   if (existing) {
     playlistId = String(existing.id);
     action = "updated";
+  } else if (libIds.length === 0) {
+    // Don't materialize an empty playlist for a channel with no content yet.
+    // The radio's fallback will route to `all` when this name is missing.
+    return { name, action: "skipped", reason: "missing and empty", songCount: 0 };
   } else {
-    // Subsonic's createPlaylist requires at least a name. Some clients also
-    // require an initial song; we send the first library track to be safe.
     const created = await subsonicJson("createPlaylist.view", {
-      name: "all",
+      name,
       songId: libIds[0],
     });
-    // Response shape varies — sometimes the new playlist comes back, sometimes
-    // not. Re-fetch the list to find it by name either way.
     playlistId = created?.playlist?.id ? String(created.playlist.id) : null;
     if (!playlistId) {
       invalidatePlaylistCaches();
       const refreshed = await getAllPlaylists();
       const found = refreshed.find(
-        (p) => typeof p?.name === "string" && p.name.toLowerCase() === "all"
+        (p) => typeof p?.name === "string" && p.name.toLowerCase() === lower
       );
       playlistId = found?.id ? String(found.id) : null;
     }
-    if (!playlistId) throw new Error("created 'all' playlist but couldn't find its id");
+    if (!playlistId) throw new Error(`created '${name}' but couldn't find its id`);
     action = "created";
   }
 
@@ -746,41 +752,72 @@ async function syncAllPlaylist() {
   const currentIdSet = new Set(currentEntries.map((e) => String(e.id)));
 
   const toAdd = libIds.filter((id) => !currentIdSet.has(id));
-  // Indices are recomputed against the original list; updatePlaylist treats
-  // them as positional, so we apply removals in descending order to keep
-  // earlier indices stable for the next chunk.
+  // updatePlaylist treats indices positionally, so we remove from the back
+  // forward to keep earlier indices stable while we chunk.
   const toRemoveIndices = [];
   currentEntries.forEach((e, i) => {
     if (!libSet.has(String(e.id))) toRemoveIndices.push(i);
   });
   toRemoveIndices.sort((a, b) => b - a);
 
-  // Subsonic accepts repeated params, but URLs over ~4KB get rejected by
-  // some intermediaries — chunk so each request stays well under that.
+  // URL length cap: Subsonic accepts repeated params, but ~4KB total query
+  // breaks some intermediaries. 80 ids per request stays comfortably below.
   const CHUNK = 80;
   for (let i = 0; i < toRemoveIndices.length; i += CHUNK) {
-    const slice = toRemoveIndices.slice(i, i + CHUNK);
     await subsonicJson("updatePlaylist.view", {
       playlistId,
-      songIndexToRemove: slice,
+      songIndexToRemove: toRemoveIndices.slice(i, i + CHUNK),
     });
   }
   for (let i = 0; i < toAdd.length; i += CHUNK) {
-    const slice = toAdd.slice(i, i + CHUNK);
     await subsonicJson("updatePlaylist.view", {
       playlistId,
-      songIdToAdd: slice,
+      songIdToAdd: toAdd.slice(i, i + CHUNK),
     });
   }
 
-  invalidatePlaylistCaches();
   return {
+    name,
     action,
     playlistId,
     songCount: libIds.length,
     added: toAdd.length,
     removed: toRemoveIndices.length,
   };
+}
+
+/**
+ * Bring every radio playlist into agreement with the current library. Each
+ * song's leading path segment routes it to the matching channel playlist
+ * (`news/...` → news, `birds/...` → birds, etc.). Songs that don't match
+ * any channel folder still land in `all`. Diffs against existing contents,
+ * so re-running is cheap.
+ */
+async function syncRadioPlaylists() {
+  const songs = await searchAllSongs();
+  if (songs.length === 0) {
+    return { ok: false, reason: "library empty", songCount: 0 };
+  }
+
+  const buckets = Object.fromEntries(SYNCABLE_PLAYLISTS.map((n) => [n, []]));
+  for (const song of songs) {
+    buckets.all.push(song.id);
+    const head = song.path.split("/")[0]?.toLowerCase();
+    if (head && head !== "all" && buckets[head]) buckets[head].push(song.id);
+  }
+
+  invalidatePlaylistCaches();
+  const results = [];
+  for (const name of SYNCABLE_PLAYLISTS) {
+    try {
+      results.push(await syncOnePlaylist(name, buckets[name]));
+    } catch (err) {
+      results.push({ name, error: err.message });
+    }
+  }
+  invalidatePlaylistCaches();
+
+  return { ok: true, songCount: songs.length, playlists: results };
 }
 
 function validate(item) {
@@ -889,7 +926,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === "POST" && url.pathname === "/admin/refresh-all-playlist") {
+    if (req.method === "POST" && url.pathname === "/admin/refresh-playlists") {
       if (!NAVIDROME_CONFIGURED) {
         sendJson(req, res, 503, { error: "navidrome not configured" });
         return;
@@ -908,10 +945,10 @@ const server = createServer(async (req, res) => {
         return;
       }
       try {
-        const result = await syncAllPlaylist();
-        sendJson(req, res, 200, { ok: true, ...result });
+        const result = await syncRadioPlaylists();
+        sendJson(req, res, 200, result);
       } catch (err) {
-        console.warn("[admin] refresh-all-playlist failed:", err.message);
+        console.warn("[admin] refresh-playlists failed:", err.message);
         sendJson(req, res, 502, { error: `refresh failed: ${err.message}` });
       }
       return;
