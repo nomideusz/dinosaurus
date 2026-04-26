@@ -667,14 +667,13 @@ function invalidatePlaylistCaches() {
 }
 
 /**
- * Page through Subsonic's search3 to enumerate every song in the library,
- * including the file path so we can bucket by leading folder. Empty query
- * returns all songs in Navidrome; we keep paging until a partial page tells
- * us we've reached the end.
+ * Page through Subsonic's search3 to enumerate every song id in the library.
+ * Empty query returns all songs in Navidrome; we keep paging until a partial
+ * page tells us we've reached the end.
  */
-async function searchAllSongs() {
+async function searchAllSongIds() {
   const PAGE = 500;
-  const songs = [];
+  const ids = [];
   let offset = 0;
   // Cap iterations so a misbehaving server can't loop us forever.
   for (let i = 0; i < 200; i++) {
@@ -688,23 +687,13 @@ async function searchAllSongs() {
     const list = sub?.searchResult3?.song ?? [];
     for (const s of list) {
       if (s?.id == null) continue;
-      songs.push({
-        id: String(s.id),
-        path: typeof s.path === "string" ? s.path : "",
-      });
+      ids.push(String(s.id));
     }
     if (list.length < PAGE) break;
     offset += PAGE;
   }
-  return songs;
+  return ids;
 }
-
-/**
- * The seven playlist names the radio looks up by RADIO_PLAYLIST. Files are
- * routed to a per-channel playlist when their leading path segment matches
- * a name here (case-insensitive). Every song also lands in `all`.
- */
-const SYNCABLE_PLAYLISTS = ["all", "news", "quakes", "facts", "thoughts", "space", "birds"];
 
 /**
  * Resolve (or create) a playlist by name and reduce its contents to exactly
@@ -784,57 +773,31 @@ async function syncOnePlaylist(name, libIds) {
 }
 
 /**
- * Bring every radio playlist into agreement with the current library. Each
- * song's leading path segment routes it to the matching channel playlist
- * (`news/...` → news, `birds/...` → birds, etc.). Tracks whose folder
- * doesn't match a channel name fall back to a stable hash → channel
- * mapping so every per-channel playlist still gets some music. Hashing on
- * the song id keeps the assignment deterministic across re-runs. Every
- * track also lands in `all`. Diffs against existing contents — cheap to
- * re-run.
+ * Sync the radio's `all` playlist to mirror the entire Navidrome library.
+ * Per-channel playlists (news, quakes, facts, thoughts, space, birds) are
+ * curated by hand in Navidrome — we don't touch them. The radio's runtime
+ * picker falls back to `all` whenever a per-channel playlist is missing or
+ * empty, so unmanaged channels still play music.
  */
 async function syncRadioPlaylists() {
-  const songs = await searchAllSongs();
-  if (songs.length === 0) {
+  const ids = await searchAllSongIds();
+  if (ids.length === 0) {
     return { ok: false, reason: "library empty", songCount: 0 };
   }
 
-  const perChannel = SYNCABLE_PLAYLISTS.filter((n) => n !== "all");
-  const buckets = Object.fromEntries(SYNCABLE_PLAYLISTS.map((n) => [n, []]));
-  let matched = 0;
-  let hashed = 0;
-  for (const song of songs) {
-    buckets.all.push(song.id);
-    const head = song.path.split("/")[0]?.toLowerCase();
-    if (head && head !== "all" && buckets[head]) {
-      buckets[head].push(song.id);
-      matched++;
-      continue;
-    }
-    let h = 0;
-    for (const c of song.id) h = ((h * 31) + c.charCodeAt(0)) | 0;
-    const ch = perChannel[Math.abs(h) % perChannel.length];
-    buckets[ch].push(song.id);
-    hashed++;
-  }
-
   invalidatePlaylistCaches();
-  const results = [];
-  for (const name of SYNCABLE_PLAYLISTS) {
-    try {
-      results.push(await syncOnePlaylist(name, buckets[name]));
-    } catch (err) {
-      results.push({ name, error: err.message });
-    }
+  let result;
+  try {
+    result = await syncOnePlaylist("all", ids);
+  } catch (err) {
+    result = { name: "all", error: err.message };
   }
   invalidatePlaylistCaches();
 
   return {
-    ok: true,
-    songCount: songs.length,
-    routedByFolder: matched,
-    routedByHash: hashed,
-    playlists: results,
+    ok: !result.error,
+    songCount: ids.length,
+    playlists: [result],
   };
 }
 
