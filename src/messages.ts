@@ -10,6 +10,7 @@
 // coordinator (in main.ts) can ask "what's available?", "claim this one",
 // "I'm carrying it here now", and "deliver it to bin K".
 
+import { RADIO_MANIFEST } from "virtual:radio-manifest";
 import type { ContentItem, ContentKind } from "./services/content.js";
 
 export type MessageState =
@@ -114,10 +115,23 @@ const PATTERN_MIN_ITEMS = 5;
 const PATTERN_MIN_DOC_COUNT = 3;
 const RADIO_STORAGE_KEY = "dinosaurus.radio.v1";
 const RADIO_CHANNELS = ["news", "quake", "history", "fact", "thought", "space", "bird"] as const;
-const RADIO_TRACKS: Partial<Record<RadioChannel, string>> = {
-  all: "/audio/radio/Mungo%20Jerry%20-%20%27%27In%20The%20Summertime%27%27.mp3",
-};
 type RadioChannel = "all" | (typeof RADIO_CHANNELS)[number];
+
+/**
+ * Maps each radio channel to its folder under `public/audio/radio/`. The
+ * radio plays a random track from that folder, falling back to the "all"
+ * folder if the channel-specific one is empty.
+ */
+const RADIO_FOLDER: Record<RadioChannel, string> = {
+  all: "all",
+  news: "news",
+  quake: "quakes",
+  history: "history",
+  fact: "facts",
+  thought: "thoughts",
+  space: "space",
+  bird: "birds",
+};
 type RadioPace = "chill" | "normal" | "busy";
 interface RadioPreferences {
   channel: RadioChannel;
@@ -191,17 +205,19 @@ export class MessageWorld {
       const el = document.createElement("button");
       el.type = "button";
       el.className = `bin bin--${def.kind}`;
+      el.dataset.empty = "true";
       el.setAttribute(
         "aria-label",
         `Open ${def.label} archive — items the dino has sorted into this bin`
       );
       el.innerHTML = `
+        <div class="bin__pulse" aria-hidden="true"></div>
         <div class="bin__top">
           <span class="bin__icon" aria-hidden="true">${escapeHtml(def.icon)}</span>
-          <span class="bin__label">${escapeHtml(def.label)}</span>
-          <span class="bin__count">0</span>
+          <span class="bin__count">00</span>
         </div>
-        <div class="bin__slot"><div class="bin__slot-inner"></div></div>
+        <div class="bin__label">${escapeHtml(def.label)}</div>
+        <div class="bin__lid"><div class="bin__slot" aria-hidden="true"></div></div>
       `;
       const countEl = el.querySelector<HTMLSpanElement>(".bin__count")!;
       this.binLayer.appendChild(el);
@@ -297,12 +313,17 @@ export class MessageWorld {
 
     const el = document.createElement("div");
     el.className = `msg msg--${item.kind}`;
+    const stampLabel = stampLabelFor(item.kind);
     el.innerHTML = `
-      <div class="msg__head">
-        <span class="msg__icon" aria-hidden="true">${escapeHtml(kindIcon(item.kind))}</span>
-        <span class="msg__kind">${escapeHtml(kindLabel(item.kind))}</span>
+      <div class="msg__tag">
+        <span class="msg__tag-icon" aria-hidden="true">${escapeHtml(kindIcon(item.kind))}</span>
+        <span class="msg__tag-label">${escapeHtml(kindLabel(item.kind))}</span>
       </div>
       <div class="msg__body">${escapeHtml(item.text)}</div>
+      <div class="msg__stamp">
+        <span class="msg__stamp-source">${escapeHtml(stampLabel)}</span>
+        <span class="msg__stamp-mark" aria-hidden="true">${item.href ? "↗" : "·"}</span>
+      </div>
     `;
     if (item.href) {
       const link = document.createElement("a");
@@ -310,7 +331,7 @@ export class MessageWorld {
       link.href = item.href;
       link.target = "_blank";
       link.rel = "noopener";
-      link.textContent = item.linkLabel ?? "open ↗";
+      link.setAttribute("aria-label", item.linkLabel ?? "open in new tab");
       el.appendChild(link);
     }
     this.cardLayer.appendChild(el);
@@ -497,7 +518,7 @@ export class MessageWorld {
     bin.delivered.unshift(newItem);
     pruneExpired(bin);
     bin.count = bin.delivered.length;
-    bin.countEl.textContent = String(bin.count);
+    updateBinCountUI(bin);
     if (this.archiveOverlay) this.archiveOverlay.refreshIfShowing(bin);
     // Pattern cards are local-only — the server never saw them, so don't
     // try to sync them. They live in the visitor's archive only.
@@ -641,40 +662,192 @@ export class MessageWorld {
   private createRadioControls(): void {
     const controls = document.createElement("div");
     controls.className = "radio-controls";
+    controls.setAttribute("role", "group");
+    controls.setAttribute("aria-label", "dino radio");
+    controls.dataset.playing = "false";
+
+    const channels: Array<{ value: RadioChannel; label: string }> = [
+      { value: "all", label: "all" },
+      { value: "news", label: "news" },
+      { value: "quake", label: "quakes" },
+      { value: "history", label: "history" },
+      { value: "fact", label: "facts" },
+      { value: "thought", label: "thoughts" },
+      { value: "space", label: "space" },
+      { value: "bird", label: "birds" },
+    ];
+    const ticks = Array.from({ length: 21 }, (_, i) => {
+      const major = i % 5 === 0;
+      return `<div class="radio-tick" style="left:${(i / 20) * 100}%;height:${major ? 8 : 4}px"></div>`;
+    }).join("");
+    const channelButtons = channels
+      .map(
+        (c) =>
+          `<button type="button" class="radio-channel" data-channel="${escapeHtml(c.value)}">${escapeHtml(c.label)}</button>`
+      )
+      .join("");
+
     controls.innerHTML = `
-      <label class="radio-control">
-        <span>radio</span>
-        <select class="radio-channel" aria-label="Dino radio channel">
-          <option value="all">all</option>
-          <option value="news">news</option>
-          <option value="quake">quakes</option>
-          <option value="history">history</option>
-          <option value="fact">facts</option>
-          <option value="thought">thoughts</option>
-          <option value="space">space</option>
-          <option value="bird">birds</option>
-        </select>
-      </label>
-      <button type="button" class="radio-music" aria-pressed="false">music off</button>
-      <span class="radio-status" aria-live="polite">tuned</span>
+      <div class="radio-brand">
+        <span class="radio-name">dinosaurus</span>
+        <button type="button" class="radio-power" aria-pressed="false" aria-label="toggle music" title="music">
+          <svg class="radio-power-pause" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+            <rect x="2" y="1.5" width="2" height="7" fill="currentColor"></rect>
+            <rect x="6" y="1.5" width="2" height="7" fill="currentColor"></rect>
+          </svg>
+          <svg class="radio-power-play" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+            <path d="M2.5 1.5 L8.5 5 L2.5 8.5 Z" fill="currentColor"></path>
+          </svg>
+        </button>
+      </div>
+      <div class="radio-top">
+        <span class="radio-freq">
+          <span class="radio-freq-num">88.0</span><span class="radio-mhz">MHz</span>
+        </span>
+        <span class="radio-live" aria-live="polite">off</span>
+      </div>
+      <div class="radio-dial"
+           role="slider"
+           tabindex="0"
+           aria-label="channel"
+           aria-valuemin="0"
+           aria-valuemax="${channels.length - 1}"
+           aria-valuenow="0">
+        ${ticks}
+        <div class="radio-needle" aria-hidden="true"></div>
+      </div>
+      <div class="radio-channels" role="tablist" aria-label="channel">
+        ${channelButtons}
+      </div>
     `;
-    const channel = controls.querySelector<HTMLSelectElement>(".radio-channel")!;
-    const music = controls.querySelector<HTMLButtonElement>(".radio-music")!;
-    this.radioStatusEl = controls.querySelector<HTMLSpanElement>(".radio-status");
-    channel.value = this.radioPrefs.channel;
-    const update = () => {
-      this.setRadioPreferences({
-        channel: sanitizeRadioChannel(channel.value),
-        pace: "normal",
-      });
+
+    const power = controls.querySelector<HTMLButtonElement>(".radio-power")!;
+    const liveEl = controls.querySelector<HTMLSpanElement>(".radio-live")!;
+    const dial = controls.querySelector<HTMLDivElement>(".radio-dial")!;
+    const needle = controls.querySelector<HTMLDivElement>(".radio-needle")!;
+    const freqNum = controls.querySelector<HTMLSpanElement>(".radio-freq-num")!;
+    const channelEls = Array.from(
+      controls.querySelectorAll<HTMLButtonElement>(".radio-channel")
+    );
+    this.radioStatusEl = liveEl;
+
+    const lastIdx = Math.max(1, channels.length - 1);
+    const applyChannel = (value: RadioChannel) => {
+      const idx = Math.max(0, channels.findIndex((c) => c.value === value));
+      const pos = idx / lastIdx;
+      needle.style.left = `calc(${(pos * 100).toFixed(2)}% - 1.5px)`;
+      // Frequency reads like a real dial: ~88 MHz at "all", 0.4 MHz per channel.
+      freqNum.textContent = (88.0 + idx * 0.4).toFixed(1);
+      for (const btn of channelEls) {
+        btn.dataset.active = btn.dataset.channel === value ? "true" : "false";
+        btn.setAttribute("aria-selected", btn.dataset.active);
+      }
+      dial.setAttribute("aria-valuenow", String(idx));
+      dial.setAttribute("aria-valuetext", channels[idx].label);
     };
-    channel.addEventListener("change", update);
-    music.addEventListener("click", async () => {
+    applyChannel(this.radioPrefs.channel);
+
+    for (const btn of channelEls) {
+      btn.addEventListener("click", () => {
+        const value = sanitizeRadioChannel(btn.dataset.channel ?? "all");
+        applyChannel(value);
+        this.setRadioPreferences({ channel: value, pace: "normal" });
+      });
+    }
+
+    power.addEventListener("click", async () => {
       const enabled = await this.radioAudio.toggleMusic(this.radioPrefs.channel);
-      music.textContent = enabled ? "music on" : "music off";
-      music.setAttribute("aria-pressed", String(enabled));
-      this.setRadioStatus(enabled ? "music tuned" : "music muted");
+      power.setAttribute("aria-pressed", String(enabled));
+      controls.dataset.playing = String(enabled);
+      this.setRadioStatus(enabled ? "live" : "off");
     });
+
+    // Draggable dial — pointer x maps to the nearest channel snap point. The
+    // visual needle / freq / active button update live during drag so the
+    // user sees what they'd land on, but we only commit (and re-tune the
+    // server feed) on release to avoid churn.
+    const channelAt = (clientX: number): { idx: number; value: RadioChannel } => {
+      const rect = dial.getBoundingClientRect();
+      const t = rect.width > 0 ? (clientX - rect.left) / rect.width : 0;
+      const idx = Math.max(0, Math.min(lastIdx, Math.round(t * lastIdx)));
+      return { idx, value: channels[idx].value };
+    };
+    let dragging = false;
+    let pendingValue: RadioChannel | null = null;
+    const onDialDown = (ev: PointerEvent) => {
+      if (ev.button !== 0 && ev.pointerType === "mouse") return;
+      ev.preventDefault();
+      dragging = true;
+      controls.dataset.dragging = "true";
+      try {
+        dial.setPointerCapture(ev.pointerId);
+      } catch {
+        /* older browsers without pointer capture — drag still works via move/up. */
+      }
+      const { value } = channelAt(ev.clientX);
+      pendingValue = value;
+      applyChannel(value);
+    };
+    const onDialMove = (ev: PointerEvent) => {
+      if (!dragging) return;
+      const { value } = channelAt(ev.clientX);
+      if (value !== pendingValue) {
+        pendingValue = value;
+        applyChannel(value);
+      }
+    };
+    const endDrag = (ev: PointerEvent) => {
+      if (!dragging) return;
+      dragging = false;
+      controls.dataset.dragging = "false";
+      try {
+        dial.releasePointerCapture(ev.pointerId);
+      } catch {
+        /* same as above. */
+      }
+      if (pendingValue && pendingValue !== this.radioPrefs.channel) {
+        this.setRadioPreferences({ channel: pendingValue, pace: "normal" });
+      }
+      pendingValue = null;
+    };
+    dial.addEventListener("pointerdown", onDialDown);
+    dial.addEventListener("pointermove", onDialMove);
+    dial.addEventListener("pointerup", endDrag);
+    dial.addEventListener("pointercancel", endDrag);
+
+    // Keyboard: arrows step one channel, home/end jump to ends. Mirrors the
+    // ARIA slider role so screen readers can drive the same control.
+    dial.addEventListener("keydown", (ev) => {
+      const curIdx = Math.max(
+        0,
+        channels.findIndex((c) => c.value === this.radioPrefs.channel)
+      );
+      let nextIdx = curIdx;
+      switch (ev.key) {
+        case "ArrowLeft":
+        case "ArrowDown":
+          nextIdx = Math.max(0, curIdx - 1);
+          break;
+        case "ArrowRight":
+        case "ArrowUp":
+          nextIdx = Math.min(lastIdx, curIdx + 1);
+          break;
+        case "Home":
+          nextIdx = 0;
+          break;
+        case "End":
+          nextIdx = lastIdx;
+          break;
+        default:
+          return;
+      }
+      ev.preventDefault();
+      if (nextIdx === curIdx) return;
+      const value = channels[nextIdx].value;
+      applyChannel(value);
+      this.setRadioPreferences({ channel: value, pace: "normal" });
+    });
+
     this.stage.appendChild(controls);
   }
 
@@ -694,7 +867,6 @@ export class MessageWorld {
     }
     this.nextSpawnAt = performance.now() + spawnGapForPace(next.pace, this.pendingItems.size);
     this.radioAudio.tune(next.channel);
-    this.setRadioStatus(`tuning ${radioChannelLabel(next.channel)}`);
     this.onRadioChange?.(next);
     this.sendRealtime({ type: "set_preferences", preferences: this.realtimePreferences() });
   }
@@ -843,7 +1015,7 @@ export class MessageWorld {
   }
 
   private drainPending(now: number): void {
-    this.updateBacklogStatus(now);
+    this.notifyBacklogPressure(now);
     if (now < this.nextSpawnAt) return;
     if (this.messages.size >= this.maxConcurrent) return;
     for (const [id, item] of this.pendingItems) {
@@ -860,18 +1032,12 @@ export class MessageWorld {
     }
   }
 
-  private updateBacklogStatus(now: number): void {
-    const pending = this.pendingItems.size;
-    if (pending >= 6) {
-      this.setRadioStatus("too much static");
-      if (now - this.lastBacklogWarningAt > 8_000) {
-        this.lastBacklogWarningAt = now;
-        this.radioAudio.warn();
-        this.onBacklogPressure?.(pending);
-      }
-    } else if (pending >= 3) {
-      this.setRadioStatus("buffering");
-    }
+  private notifyBacklogPressure(now: number): void {
+    if (this.pendingItems.size < 6) return;
+    if (now - this.lastBacklogWarningAt <= 8_000) return;
+    this.lastBacklogWarningAt = now;
+    this.radioAudio.warn();
+    this.onBacklogPressure?.(this.pendingItems.size);
   }
 
   private matchesRadio(item: { kind: ContentKind }): boolean {
@@ -899,7 +1065,7 @@ export class MessageWorld {
     bin.delivered.unshift(item);
     pruneExpired(bin);
     bin.count = bin.delivered.length;
-    bin.countEl.textContent = String(bin.count);
+    updateBinCountUI(bin);
     if (!wasPresent) bumpBin(bin);
     if (this.archiveOverlay) this.archiveOverlay.refreshIfShowing(bin);
     // Server delivery is authoritative. If another client sorted this card
@@ -916,7 +1082,7 @@ export class MessageWorld {
       bin.delivered = bin.delivered.filter((d) => !set.has(d.id));
       if (bin.delivered.length !== before) {
         bin.count = bin.delivered.length;
-        bin.countEl.textContent = String(bin.count);
+        updateBinCountUI(bin);
         if (this.archiveOverlay) this.archiveOverlay.refreshIfShowing(bin);
       }
     }
@@ -936,7 +1102,7 @@ export class MessageWorld {
       bin.delivered = [...localOnly, ...list];
       pruneExpired(bin);
       bin.count = bin.delivered.length;
-      bin.countEl.textContent = String(bin.count);
+      updateBinCountUI(bin);
       if (bin.count > before) bumpBin(bin);
       if (this.archiveOverlay) this.archiveOverlay.refreshIfShowing(bin);
     }
@@ -1208,6 +1374,17 @@ function bumpBin(bin: CategoryBin): void {
   bin.el.classList.add("bin--bump");
 }
 
+/** Two-digit zero-padded count for tidy bin tickers ("00", "07", "42"). */
+function formatBinCount(n: number): string {
+  return n < 100 ? String(n).padStart(2, "0") : String(n);
+}
+
+/** Refresh the bin's visible count + empty-state styling. */
+function updateBinCountUI(bin: CategoryBin): void {
+  bin.countEl.textContent = formatBinCount(bin.count);
+  bin.el.dataset.empty = bin.count === 0 ? "true" : "false";
+}
+
 /** Validate a single ContentItem-shaped value (from a server "item" event). */
 function sanitizeContentItem(raw: unknown): ContentItem | null {
   if (!raw || typeof raw !== "object") return null;
@@ -1319,6 +1496,28 @@ function kindIcon(kind: ContentKind): string {
       return "☄";
     case "bird":
       return "Λ";
+  }
+}
+
+/** Source-style suffix for the card's footer stamp. */
+function stampLabelFor(kind: ContentKind): string {
+  switch (kind) {
+    case "news":
+      return "hn";
+    case "quake":
+      return "usgs";
+    case "history":
+      return "on this day";
+    case "fact":
+      return "field note";
+    case "thought":
+      return "scratch";
+    case "space":
+      return "nasa";
+    case "bird":
+      return "ebird";
+    case "weather":
+      return "open-meteo";
   }
 }
 
@@ -1482,31 +1681,17 @@ function spawnGapForPace(pace: RadioPace, backlog = 0): number {
   }
 }
 
-function radioChannelLabel(channel: RadioChannel): string {
-  switch (channel) {
-    case "all":
-      return "all";
-    case "quake":
-      return "quakes";
-    case "fact":
-      return "facts";
-    case "thought":
-      return "thoughts";
-    case "history":
-    case "news":
-    case "space":
-      return channel;
-    case "bird":
-      return "birds";
-  }
-}
-
 class RadioAudio {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private hum: OscillatorNode | null = null;
   private musicGain: GainNode | null = null;
   private track: HTMLAudioElement | null = null;
+  /** URL of the track currently in `this.track`. Used so we can pick a
+   *  *different* random track when the current one ends. */
+  private currentTrackSrc: string | null = null;
+  /** `ended` handler we attach so chained playback survives src changes. */
+  private trackEndedHandler: (() => void) | null = null;
   private staticTimer: number | null = null;
   private musicTimer: number | null = null;
   private musicStep = 0;
@@ -1623,8 +1808,13 @@ class RadioAudio {
     this.musicTimer = null;
     if (this.track) {
       this.track.pause();
+      if (this.trackEndedHandler) {
+        this.track.removeEventListener("ended", this.trackEndedHandler);
+      }
       this.track = null;
     }
+    this.trackEndedHandler = null;
+    this.currentTrackSrc = null;
     this.musicGain?.disconnect();
     this.musicGain = null;
     this.musicEnabled = false;
@@ -1632,35 +1822,58 @@ class RadioAudio {
   }
 
   private async startTrack(channel: RadioChannel): Promise<boolean> {
-    const src = trackForChannel(channel);
+    const src = pickTrack(channel, null);
     if (!src) return false;
     const audio = new Audio(src);
-    audio.loop = true;
+    // No `loop` — we chain a fresh random track on `ended` instead, so the
+    // listener gets variety inside a channel.
     audio.volume = 0.42;
     audio.preload = "auto";
+    const onEnded = () => this.playNextRandom();
+    audio.addEventListener("ended", onEnded);
     try {
       await audio.play();
       this.track = audio;
+      this.currentTrackSrc = src;
+      this.trackEndedHandler = onEnded;
       this.musicEnabled = true;
       this.musicChannel = channel;
       return true;
     } catch {
+      audio.removeEventListener("ended", onEnded);
       return false;
     }
   }
 
+  /** Swap the playing track for a fresh random pick from the new channel. */
   private async switchTrack(channel: RadioChannel): Promise<void> {
-    const src = trackForChannel(channel);
-    if (!src || !this.track) return;
-    const absolute = new URL(src, window.location.href).href;
+    if (!this.track) return;
+    const next = pickTrack(channel, this.currentTrackSrc);
+    if (!next) return;
+    const absolute = new URL(next, window.location.href).href;
     if (this.track.src === absolute) return;
-    this.track.src = src;
+    this.track.src = next;
+    this.currentTrackSrc = next;
     try {
       await this.track.play();
     } catch {
       this.stopMusic();
       await this.toggleMusic(channel);
     }
+  }
+
+  /** Called when the current track ends — pick another random one in the
+   *  same channel (different URL when there's a choice) and start playing. */
+  private playNextRandom(): void {
+    if (!this.musicEnabled || !this.track) return;
+    const next = pickTrack(this.musicChannel, this.currentTrackSrc);
+    if (!next) {
+      this.stopMusic();
+      return;
+    }
+    this.track.src = next;
+    this.currentTrackSrc = next;
+    void this.track.play().catch(() => this.stopMusic());
   }
 
   private closeIfSilent(): void {
@@ -1778,8 +1991,23 @@ function channelScale(channel: RadioChannel): number[] {
   }
 }
 
-function trackForChannel(channel: RadioChannel): string | undefined {
-  return RADIO_TRACKS[channel] ?? RADIO_TRACKS.all;
+/**
+ * Pick a random track URL for the given channel. Falls back to the "all"
+ * folder when the channel-specific one is empty (or unknown). When `avoid`
+ * is supplied and there are at least two candidates, the chosen track is
+ * guaranteed to differ — so successive plays don't repeat the same song.
+ */
+function pickTrack(channel: RadioChannel, avoid: string | null): string | undefined {
+  const folder = RADIO_FOLDER[channel];
+  let pool = RADIO_MANIFEST[folder] ?? [];
+  if (pool.length === 0 && folder !== RADIO_FOLDER.all) {
+    pool = RADIO_MANIFEST[RADIO_FOLDER.all] ?? [];
+  }
+  if (pool.length === 0) return undefined;
+  if (pool.length === 1) return pool[0];
+  const candidates = avoid ? pool.filter((t) => t !== avoid) : pool;
+  const list = candidates.length > 0 ? candidates : pool;
+  return list[Math.floor(Math.random() * list.length)];
 }
 
 let stylesInjected = false;
@@ -1800,14 +2028,14 @@ function injectStylesOnce(): void {
       position: absolute;
       left: 0;
       top: 0;
-      width: clamp(180px, 22vw, 260px);
-      padding: 8px 10px 9px;
+      width: clamp(200px, 22vw, 240px);
+      padding: 14px 14px 10px;
       background: var(--paper, #1f1e26);
       color: var(--ink, #e8e4d8);
-      border: 1.5px solid var(--ink, #e8e4d8);
-      border-radius: 2px;
-      box-shadow: 0 6px 0 rgba(0, 0, 0, 0.25);
-      font: 500 12.5px/1.45 "Ioskeley Mono", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+      border: 1px solid rgba(232, 228, 216, 0.16);
+      border-radius: 0;
+      box-shadow: 0 6px 0 rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(0, 0, 0, 0.4);
+      font: 400 12px/1.45 "Ioskeley Mono", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
       pointer-events: auto;
       opacity: 0;
       transition: opacity 240ms ease, transform 320ms cubic-bezier(.2,.7,.2,1.4),
@@ -1821,52 +2049,73 @@ function injectStylesOnce(): void {
 
     .msg--delivering {
       transition: transform 360ms cubic-bezier(.4,.05,.6,.4),
-                  opacity 360ms ease;
-      opacity: 0.0;
+                  opacity 360ms ease,
+                  filter 360ms ease;
+      opacity: 0;
       filter: blur(0.4px);
     }
 
-    .msg__head {
-      display: flex;
-      align-items: baseline;
-      gap: 6px;
-      margin-bottom: 6px;
-      padding-bottom: 4px;
-      border-bottom: 1px dashed rgba(138, 134, 120, 0.32);
-      color: var(--accent, var(--ink-soft, #8a8678));
+    /* Sticker tag overlapping the top-left edge — the card's source label. */
+    .msg__tag {
+      position: absolute;
+      top: -10px;
+      left: 12px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 2px 8px;
+      background: var(--ink, #e8e4d8);
+      color: var(--paper, #1f1e26);
       font-size: 10px;
-      letter-spacing: 0.16em;
+      letter-spacing: 0.14em;
       text-transform: uppercase;
+      font-weight: 600;
+      line-height: 1.2;
     }
-    .msg__icon {
-      font-size: 12px;
-      line-height: 1;
+    .msg__tag-icon {
+      font-size: 11px;
       letter-spacing: 0;
-      text-transform: none;
-      /* Aligns the chunky glyph with the lowercase-derived baseline. */
-      transform: translateY(1px);
+      transform: translateY(0.5px);
     }
 
     .msg__body {
       white-space: pre-wrap;
       word-break: break-word;
+      padding-top: 4px;
     }
 
+    .msg__stamp {
+      margin-top: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      color: var(--ink-soft, #8a8678);
+      font-size: 10.5px;
+      letter-spacing: 0.04em;
+    }
+    .msg__stamp-mark {
+      opacity: 0.6;
+    }
+
+    /* Whole card becomes the link when an href exists — the .msg__link
+       overlay sits on top, transparent, so click anywhere on the card opens. */
     .msg__link {
-      display: inline-block;
-      margin-top: 6px;
-      color: var(--ink, #e8e4d8);
+      position: absolute;
+      inset: 0;
+      text-indent: -9999px;
+      overflow: hidden;
+      color: transparent;
+      background: transparent;
       text-decoration: none;
-      border-bottom: 1px solid var(--ink, #e8e4d8);
-      font-size: 11px;
+      border: 0;
     }
-    .msg__link:hover {
-      background: var(--ink, #e8e4d8);
-      color: var(--paper, #1f1e26);
+    .msg__link:focus-visible {
+      outline: 2px solid var(--accent, var(--ink, #e8e4d8));
+      outline-offset: 2px;
     }
+    .msg:has(.msg__link:hover) .msg__stamp-mark { opacity: 1; color: var(--ink, #e8e4d8); }
 
-    /* Per-kind accent colour. Applied to the head (icon + label) and the
-       hairline on hover — quieter than the old colored edge. */
+    /* Per-kind accent colour. Applied to the sticker tag and stamp arrow. */
     .msg--news    { --accent: #ff9a73; }
     .msg--weather { --accent: #7ec8ff; }
     .msg--fact    { --accent: #8dd9a8; }
@@ -1875,141 +2124,270 @@ function injectStylesOnce(): void {
     .msg--history { --accent: #d4a574; }
     .msg--space   { --accent: #9eb5ff; }
     .msg--bird    { --accent: #e0a8c0; }
-    .msg:hover .msg__head { border-bottom-color: var(--accent, rgba(138, 134, 120, 0.32)); }
+    .msg .msg__tag { background: var(--accent, var(--ink, #e8e4d8)); }
 
     .radio-controls {
       position: absolute;
-      left: 12px;
-      top: 12px;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      align-items: center;
-      padding: 6px 8px;
-      background: var(--paper, #1f1e26);
+      left: 22px;
+      top: 18px;
+      width: 280px;
+      max-width: calc(100vw - 44px);
+      padding: 10px 14px;
+      background: rgba(20, 20, 26, 0.86);
       color: var(--ink, #e8e4d8);
       border: 1px solid var(--ink-soft, #8a8678);
-      border-radius: 2px;
-      font: 600 10px/1.2 "Ioskeley Mono", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
+      border-radius: 0;
+      font: 400 11px/1.3 "Ioskeley Mono", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
       z-index: 5;
     }
-    .radio-control {
+
+    .radio-brand {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid rgba(232, 228, 216, 0.18);
+      font-size: 13px;
+      letter-spacing: 0.04em;
+    }
+    .radio-power {
+      width: 18px;
+      height: 18px;
       display: flex;
       align-items: center;
-      gap: 5px;
-    }
-    .radio-control select {
-      background: var(--bg, #14141a);
-      color: var(--ink, #e8e4d8);
-      border: 1px solid var(--ink-soft, #8a8678);
-      border-radius: 1px;
-      font: inherit;
-      letter-spacing: 0;
-      text-transform: none;
-    }
-    .radio-music {
+      justify-content: center;
       background: transparent;
-      color: var(--ink, #e8e4d8);
       border: 1px solid var(--ink-soft, #8a8678);
-      border-radius: 1px;
-      font: inherit;
-      letter-spacing: 0;
-      text-transform: none;
-      cursor: pointer;
-    }
-    .radio-music[aria-pressed="true"] {
-      background: var(--ink, #e8e4d8);
-      color: var(--paper, #1f1e26);
-    }
-    .radio-status {
       color: var(--ink-soft, #8a8678);
-      letter-spacing: 0.06em;
+      padding: 0;
+      cursor: pointer;
+      transition: color 0.15s ease, border-color 0.15s ease;
+    }
+    .radio-power:hover { color: #d97758; border-color: #d97758; }
+    .radio-controls[data-playing="true"] .radio-power { color: var(--ink, #e8e4d8); }
+    .radio-power-pause { display: none; }
+    .radio-power-play  { display: block; }
+    .radio-controls[data-playing="true"] .radio-power-pause { display: block; }
+    .radio-controls[data-playing="true"] .radio-power-play  { display: none; }
+
+    .radio-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 8px;
+    }
+    .radio-freq {
+      font-size: 17px;
+      font-variant-numeric: tabular-nums;
+    }
+    .radio-mhz {
+      font-size: 10px;
+      color: var(--ink-soft, #8a8678);
+      margin-left: 4px;
+    }
+    .radio-live {
+      font-size: 9.5px;
+      color: var(--ink-soft, #8a8678);
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+    .radio-live::before {
+      content: "● ";
+      color: var(--ink-soft, #8a8678);
+    }
+    .radio-controls[data-playing="true"] .radio-live::before {
+      color: #d97758;
+      animation: radioBlink 1.6s ease-in-out infinite;
+    }
+    @keyframes radioBlink {
+      0%, 100% { opacity: 1; }
+      50%      { opacity: 0.45; }
+    }
+
+    .radio-dial {
+      position: relative;
+      height: 8px;
+      background: rgba(232, 228, 216, 0.10);
+      cursor: grab;
+      /* Hit area is taller than the visible bar so the dial is easy to grab. */
+      padding: 6px 0;
+      margin: -6px 0;
+      background-clip: content-box;
+      touch-action: none;
+      transition: opacity 0.25s ease;
+    }
+    .radio-controls[data-playing="false"] .radio-dial { opacity: 0.45; }
+    .radio-controls[data-dragging="true"]  .radio-dial { cursor: grabbing; }
+    .radio-dial:focus-visible {
+      outline: 1px dashed var(--ink-soft, #8a8678);
+      outline-offset: 4px;
+    }
+    .radio-tick {
+      position: absolute;
+      top: 6px;
+      width: 1px;
+      background: var(--ink-soft, #8a8678);
+      pointer-events: none;
+    }
+    .radio-needle {
+      position: absolute;
+      top: 3px;
+      width: 3px;
+      height: 14px;
+      background: var(--ink, #e8e4d8);
+      pointer-events: none;
+      transition: left 0.25s cubic-bezier(.5, 0, .2, 1.6);
+    }
+    /* While dragging, lose the snap-easing so the needle tracks the cursor. */
+    .radio-controls[data-dragging="true"] .radio-needle { transition: none; }
+
+    .radio-channels {
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      row-gap: 2px;
+      column-gap: 2px;
+      margin-top: 6px;
+      font-size: 9px;
+      color: var(--ink-soft, #8a8678);
+      letter-spacing: 0;
+    }
+    .radio-channel {
+      flex: 0 1 auto;
+      min-width: 0;
+      background: transparent;
+      border: 0;
+      padding: 0;
+      margin: 0;
+      cursor: pointer;
+      color: var(--ink-soft, #8a8678);
+      font: inherit;
+      letter-spacing: inherit;
+      white-space: nowrap;
+      transition: color 0.15s ease;
+    }
+    .radio-channel[data-active="true"] { color: var(--ink, #e8e4d8); }
+    .radio-channel:hover               { color: var(--ink, #e8e4d8); }
+    .radio-channel:focus-visible {
+      outline: 1px dashed var(--ink-soft, #8a8678);
+      outline-offset: 2px;
     }
 
     .bin-row {
       position: absolute;
       left: 0;
       right: 0;
-      bottom: 12px;
+      bottom: 24px;
       display: flex;
       flex-wrap: wrap;
       justify-content: center;
-      gap: 10px 14px;
-      padding: 0 16px;
+      gap: 10px;
+      padding: 0 22px;
       pointer-events: none;
       z-index: 3;
     }
 
     .bin {
       pointer-events: auto;
-      min-width: 110px;
-      max-width: 180px;
-      padding: 6px 10px 8px;
+      flex: 0 0 132px;
+      padding: 10px 12px 28px;
+      position: relative;
       background: var(--paper, #1f1e26);
-      border: 1.5px solid var(--ink, #e8e4d8);
-      border-radius: 2px;
+      border: 1px solid rgba(232, 228, 216, 0.18);
+      border-radius: 0;
       color: var(--ink, #e8e4d8);
-      font: 600 11px/1.2 "Ioskeley Mono", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
+      font: 400 10.5px/1.2 "Ioskeley Mono", ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
       text-align: left;
       cursor: pointer;
       transform-origin: 50% 100%;
-      transition: transform 220ms cubic-bezier(.2,.7,.2,1.4),
-                  background-color 160ms ease, color 160ms ease;
+      transition: border-color 160ms ease, transform 220ms cubic-bezier(.2,.7,.2,1.4);
     }
-    .bin:hover { background: var(--ink, #e8e4d8); color: var(--paper, #1f1e26); }
-    .bin:hover .bin__count { color: var(--paper, #1f1e26); }
+    .bin:hover { border-color: var(--ink-soft, #8a8678); transform: translateY(-1px); }
     .bin:focus-visible {
-      outline: 2px solid var(--ink, #e8e4d8);
+      outline: 1px solid var(--ink, #e8e4d8);
       outline-offset: 2px;
     }
+    .bin[data-empty="true"] { opacity: 0.6; }
     .bin--bump { animation: binBump 360ms cubic-bezier(.2,.7,.2,1.4); }
     @keyframes binBump {
       0%   { transform: translateY(0) scale(1); }
-      35%  { transform: translateY(-6px) scale(1.04); }
+      35%  { transform: translateY(-4px) scale(1.03); }
       100% { transform: translateY(0) scale(1); }
+    }
+
+    .bin__pulse {
+      position: absolute;
+      inset: -1px;
+      border: 1px solid transparent;
+      pointer-events: none;
+      opacity: 0;
+    }
+    .bin--bump .bin__pulse {
+      animation: binPulse 1.4s ease-out;
+    }
+    @keyframes binPulse {
+      0%   { opacity: 0.9; transform: scale(1); border-color: var(--accent, #d97758); }
+      100% { opacity: 0; transform: scale(1.12); border-color: var(--accent, #d97758); }
     }
 
     .bin__top {
       display: flex;
+      justify-content: space-between;
       align-items: baseline;
-      gap: 8px;
     }
     .bin__icon {
-      font-size: 14px;
+      font-size: 13px;
       letter-spacing: 0;
       text-transform: none;
+      color: var(--ink, #e8e4d8);
     }
-    .bin__label { flex: 1; }
     .bin__count {
-      font-size: 13px;
+      font-size: 10px;
       color: var(--ink-soft, #8a8678);
       letter-spacing: 0;
+      font-variant-numeric: tabular-nums;
     }
-    .bin__slot {
-      margin-top: 6px;
-      height: 6px;
+    .bin__label {
+      font-size: 9px;
+      color: var(--ink-soft, #8a8678);
+      letter-spacing: 0.10em;
+      text-transform: uppercase;
+      margin-top: 4px;
+    }
+    .bin__lid {
+      position: absolute;
+      left: 8px;
+      right: 8px;
+      bottom: 8px;
+      height: 16px;
       background: var(--bg, #14141a);
-      border: 1px solid var(--ink-soft, #8a8678);
-      border-radius: 1px;
+      border-top: 1px solid var(--ink-soft, #8a8678);
       overflow: hidden;
     }
-    .bin__slot-inner {
-      width: 100%;
-      height: 100%;
+    .bin__slot {
+      position: absolute;
+      left: 50%;
+      top: 4px;
+      transform: translateX(-50%);
+      width: 36px;
+      height: 2px;
+      background: var(--bg, #14141a);
+      box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.5);
     }
 
-    .bin--news    { border-bottom: 4px solid #ff9a73; }
-    .bin--weather { border-bottom: 4px solid #7ec8ff; }
-    .bin--fact    { border-bottom: 4px solid #8dd9a8; }
-    .bin--thought { border-bottom: 4px solid #c8a8ff; }
-    .bin--quake   { border-bottom: 4px solid #f3c969; }
-    .bin--history { border-bottom: 4px solid #d4a574; }
-    .bin--space   { border-bottom: 4px solid #9eb5ff; }
-    .bin--bird    { border-bottom: 4px solid #e0a8c0; }
+    .bin--news    { --accent: #ff9a73; }
+    .bin--weather { --accent: #7ec8ff; }
+    .bin--fact    { --accent: #8dd9a8; }
+    .bin--thought { --accent: #c8a8ff; }
+    .bin--quake   { --accent: #f3c969; }
+    .bin--history { --accent: #d4a574; }
+    .bin--space   { --accent: #9eb5ff; }
+    .bin--bird    { --accent: #e0a8c0; }
+    .bin:hover { border-color: var(--accent, var(--ink-soft, #8a8678)); }
+    .bin:hover .bin__icon { color: var(--accent, var(--ink, #e8e4d8)); }
 
     .archive-backdrop {
       position: absolute;

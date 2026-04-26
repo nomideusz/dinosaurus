@@ -94,11 +94,36 @@ interface Splash {
   age: number;
 }
 
+interface Bird {
+  /** Position fraction across the world width [0, 1+]. */
+  x: number;
+  /** Vertical position fraction in the upper sky [0, 1]. */
+  y: number;
+  /** Drift across the world width per second. */
+  speed: number;
+  /** Wing-flap phase. */
+  flapPhase: number;
+}
+
+interface Firefly {
+  /** Stable per-firefly column offset. */
+  bx: number;
+  /** Phase offsets so each fly flickers and drifts on its own rhythm. */
+  driftPhase: number;
+  bobPhase: number;
+  blinkPhase: number;
+}
+
 export class World {
   private stars: Star[] = [];
   private clouds: Cloud[] = [];
   private drops: Drop[] = [];
   private splashes: Splash[] = [];
+  private birds: Bird[] = [];
+  private fireflies: Firefly[] = [];
+  /** Two layers of horizon silhouette (far + near) — regenerated on resize. */
+  private hillsFar: Array<[number, number]> = [];
+  private hillsNear: Array<[number, number]> = [];
   private dropsKind: "rain" | "snow" | "none" = "none";
   /** Slowly varying horizontal wind, [-1, 1]. Drives rain angle + cloud sway. */
   private wind = 0;
@@ -116,12 +141,18 @@ export class World {
     this.weatherFn = opts.weather ?? (() => null);
     this.regenStars();
     this.regenClouds();
+    this.regenHills();
+    this.regenBirds();
+    this.regenFireflies();
   }
 
   resize(state: WorldState): void {
     this.state = state;
     this.regenStars();
     this.regenClouds();
+    this.regenHills();
+    this.regenBirds();
+    this.regenFireflies();
     this.drops = [];
     this.splashes = [];
     this.dropsKind = "none";
@@ -145,6 +176,7 @@ export class World {
     this.tickDrops(wx, dt);
     this.tickSplashes(dt);
     this.tickLightning(wx, dt);
+    this.tickBirds(dt);
   }
 
   draw(ctx: CanvasRenderingContext2D): void {
@@ -164,8 +196,13 @@ export class World {
     // Horizon glow at sunrise/sunset — soft warm wash low on the screen.
     this.drawHorizonGlow(ctx, h);
 
-    // Stars (only at night-ish hours; heavy clouds also dim them).
+    // Aurora bands at deep night when the sky is reasonably clear — drawn
+    // before stars so it reads as a soft veil behind them.
     const cloudAlpha = wx ? cloudAlphaFor(wx) : 0;
+    const auroraA = auroraAlpha(h) * (1 - cloudAlpha * 0.85);
+    if (auroraA > 0.01) this.drawAurora(ctx, auroraA);
+
+    // Stars (only at night-ish hours; heavy clouds also dim them).
     const sa = starAlpha(h) * (1 - cloudAlpha * 0.7);
     if (sa > 0.01) this.drawStars(ctx, sa);
 
@@ -177,11 +214,23 @@ export class World {
     // Sun (by day) or moon (by night) arcing across the sky.
     this.drawCelestial(ctx, h, 1 - cloudAlpha * 0.55, date);
 
+    // Distant horizon silhouettes — derived from the bottom sky color so they
+    // always sit *between* the sky and the foreground cloud band.
+    this.drawHills(ctx, h);
+
     // Mid + near cloud layers in front of the celestial body.
     if (this.clouds.length > 0 && cloudAlpha > 0) {
       this.drawCloudLayer(ctx, 1, cloudAlpha, wx);
       this.drawCloudLayer(ctx, 2, cloudAlpha, wx);
     }
+
+    // Pixel birds drifting across the upper sky on clear-ish days.
+    const dayA = dayCreatureAlpha(h) * (1 - cloudAlpha * 0.6);
+    if (dayA > 0.05) this.drawBirds(ctx, dayA);
+
+    // Fireflies near the lower sky band on clear nights.
+    const flyA = fireflyAlpha(h) * (1 - cloudAlpha * 0.85);
+    if (flyA > 0.05) this.drawFireflies(ctx, flyA);
 
     // Fog haze — gradient overlay denser near the ground.
     if (wx?.fog) this.drawFog(ctx);
@@ -296,41 +345,35 @@ export class World {
     ctx: CanvasRenderingContext2D,
     x: number,
     y: number,
-    horizonness: number
+    horizonness: number,
   ): void {
-    const r = 14;
+    // Bigger near the horizon — matches the design (r=30 at noon, r=36 low),
+    // sells the atmospheric magnification you actually see at sunrise/sunset.
+    const r = 28 + 8 * horizonness;
     // Color shifts from warm gold at noon to deep orange near the horizon.
     const ease = horizonness * horizonness;
     const discR = clampByte(248 - 4 * ease);
     const discG = clampByte(208 - 64 * ease);
     const discB = clampByte(138 - 84 * ease);
-    const glowR = clampByte(240);
-    const glowG = clampByte(196 - 50 * ease);
-    const glowB = clampByte(130 - 40 * ease);
-    const glowCss = (a: number) =>
-      `rgba(${glowR}, ${glowG}, ${glowB}, ${a.toFixed(3)})`;
+    const glowR = clampByte(255);
+    const glowG = clampByte(210 - 30 * ease);
+    const glowB = clampByte(140 - 40 * ease);
 
-    // Multi-layer corona — outermost is the widest, faintest halo. The middle
-    // band carries most of the warmth. The inner band is the bright bloom that
-    // sells the disc's "hot" core.
-    const layers: Array<{ rMul: number; alpha: number }> = [
-      { rMul: 6.0, alpha: 0.06 + 0.10 * ease },
-      { rMul: 3.6, alpha: 0.18 + 0.10 * ease },
-      { rMul: 2.0, alpha: 0.34 },
-    ];
-    for (const layer of layers) {
-      const grad = ctx.createRadialGradient(x, y, r * 0.4, x, y, r * layer.rMul);
-      grad.addColorStop(0, glowCss(layer.alpha));
-      grad.addColorStop(1, glowCss(0));
-      ctx.fillStyle = grad;
-      const w = r * layer.rMul * 2;
-      ctx.fillRect(x - w / 2, y - w / 2, w, w);
+    // Stacked halo arcs — five concentric warm rings, biggest+faintest first,
+    // smallest+strongest last. Reads cleaner than a single radial blur and
+    // matches the rest of the pixel-flavoured style.
+    for (let i = 4; i >= 0; i--) {
+      const a = 0.05 + (4 - i) * 0.02;
+      ctx.fillStyle = `rgba(${glowR}, ${glowG}, ${glowB}, ${a.toFixed(3)})`;
+      ctx.beginPath();
+      ctx.arc(x, y, r * (1 + i * 0.6), 0, Math.PI * 2);
+      ctx.fill();
     }
 
     // Sun rays — only fade in when the sun is low (horizon scattering effect).
     if (horizonness > 0.4) {
       const rayAlpha = (horizonness - 0.4) * 0.30;
-      ctx.strokeStyle = glowCss(rayAlpha);
+      ctx.strokeStyle = `rgba(${glowR}, ${glowG}, ${glowB}, ${rayAlpha.toFixed(3)})`;
       ctx.lineWidth = 1;
       ctx.beginPath();
       const rayCount = 10;
@@ -351,8 +394,8 @@ export class World {
     // Disc with a touch of limb darkening: an off-center radial gradient
     // produces a subtle "lit from above-left" feel without being cartoonish.
     const discGrad = ctx.createRadialGradient(
-      x - r * 0.25, y - r * 0.25, r * 0.15,
-      x, y, r
+      x - r * 0.3, y - r * 0.3, r * 0.2,
+      x, y, r,
     );
     discGrad.addColorStop(0, rgbToCss([
       clampByte(discR + 12), clampByte(discG + 12), clampByte(discB + 8),
@@ -370,18 +413,22 @@ export class World {
     y: number,
     date: Date
   ): void {
-    const r = 12;
+    const r = 18;
     const phase = lunarPhase(date); // 0..1
     const illum = (1 - Math.cos(phase * Math.PI * 2)) / 2; // 0..1
     const waxing = phase < 0.5;
 
-    // Outer halo — slightly brighter when the moon is full.
-    const haloAlpha = 0.08 + illum * 0.12;
-    const haloGrad = ctx.createRadialGradient(x, y, r * 0.6, x, y, r * 4);
-    haloGrad.addColorStop(0, `rgba(220, 222, 235, ${haloAlpha.toFixed(3)})`);
-    haloGrad.addColorStop(1, "rgba(220, 222, 235, 0)");
-    ctx.fillStyle = haloGrad;
-    ctx.fillRect(x - r * 4, y - r * 4, r * 8, r * 8);
+    // Stacked halo arcs — four concentric cool rings; brighter near the disc,
+    // fading outward. A full moon nudges every layer up a touch so it really
+    // glows. Mirrors the stacked-arc style we use for the sun.
+    const haloBoost = 0.04 * illum;
+    for (let i = 3; i >= 0; i--) {
+      const a = 0.04 + (3 - i) * 0.02 + haloBoost;
+      ctx.fillStyle = `rgba(220, 222, 235, ${a.toFixed(3)})`;
+      ctx.beginPath();
+      ctx.arc(x, y, r * (1 + i * 0.7), 0, Math.PI * 2);
+      ctx.fill();
+    }
 
     // Earthshine: the dark side faintly visible when the moon is a thin crescent.
     // Strongest near new moon, gone by first quarter.
@@ -800,6 +847,145 @@ export class World {
       });
     }
   }
+
+  /** Two-layer horizon silhouette. The path is sampled once at resize time. */
+  private regenHills(): void {
+    const { width, height } = this.state;
+    this.hillsFar = hillPath(7331, height * 0.62, height * 0.028, 22, width);
+    this.hillsNear = hillPath(919, height * 0.74, height * 0.036, 16, width);
+  }
+
+  private regenBirds(): void {
+    // Bird density scales gently with width; a 1200px sky gets ~5 birds.
+    const count = Math.max(3, Math.round(this.state.width / 240));
+    let seed = 4242;
+    const rand = (): number => {
+      seed = (seed * 9301 + 49297) % 233280;
+      return seed / 233280;
+    };
+    this.birds = [];
+    for (let i = 0; i < count; i++) {
+      this.birds.push({
+        x: rand(),
+        y: 0.10 + rand() * 0.18,
+        // Slightly different cruising speeds so the flock doesn't move in lockstep.
+        speed: 0.012 + rand() * 0.012,
+        flapPhase: rand() * Math.PI * 2,
+      });
+    }
+  }
+
+  private regenFireflies(): void {
+    let seed = 808;
+    const rand = (): number => {
+      seed = (seed * 9301 + 49297) % 233280;
+      return seed / 233280;
+    };
+    const count = Math.max(8, Math.round(this.state.width / 90));
+    this.fireflies = [];
+    for (let i = 0; i < count; i++) {
+      this.fireflies.push({
+        bx: rand() * this.state.width,
+        driftPhase: rand() * Math.PI * 2,
+        bobPhase: rand() * Math.PI * 2,
+        blinkPhase: rand() * Math.PI * 2,
+      });
+    }
+  }
+
+  private drawHills(ctx: CanvasRenderingContext2D, h: number): void {
+    if (this.hillsFar.length === 0) return;
+    const { width, height } = this.state;
+    const [, bottomRGB] = this.skyAt(h);
+    // Pull each hill layer toward the page background — more so for the near
+    // layer, so they read as receding silhouettes against the sky bottom.
+    const bg: RGB = [0x14, 0x14, 0x1a];
+    const farRGB = lerpRGB(bottomRGB, bg, 0.55);
+    const nearRGB = lerpRGB(bottomRGB, bg, 0.78);
+
+    ctx.fillStyle = rgbToCss(farRGB);
+    fillHillPath(ctx, this.hillsFar, width, height);
+    ctx.fillStyle = rgbToCss(nearRGB);
+    fillHillPath(ctx, this.hillsNear, width, height);
+  }
+
+  private drawAurora(ctx: CanvasRenderingContext2D, alpha: number): void {
+    const { width, height } = this.state;
+    const t = performance.now() / 1000;
+    // Three offset bands in different cool hues — they share a vertical band
+    // (10%–50% of height) and shimmer at slightly different rates.
+    const bands: Array<[number, number, number]> = [
+      [120, 200, 180],
+      [100, 180, 210],
+      [180, 140, 200],
+    ];
+    for (let band = 0; band < bands.length; band++) {
+      const [r, g, b] = bands[band];
+      const peak = (0.10 + 0.04 * Math.sin(t * 0.5 + band)) * alpha;
+      const grad = ctx.createLinearGradient(0, height * 0.10, 0, height * 0.50);
+      grad.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0)`);
+      grad.addColorStop(0.5, `rgba(${r}, ${g}, ${b}, ${peak.toFixed(3)})`);
+      grad.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      const baseY = height * 0.12 + band * Math.max(18, height * 0.04);
+      ctx.moveTo(0, baseY);
+      for (let x = 0; x <= width; x += 20) {
+        const y = baseY + Math.sin(x * 0.012 + t * 0.3 + band) * 22;
+        ctx.lineTo(x, y);
+      }
+      ctx.lineTo(width, height * 0.50);
+      ctx.lineTo(0, height * 0.50);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  private tickBirds(dt: number): void {
+    if (this.birds.length === 0) return;
+    for (const b of this.birds) {
+      b.x += b.speed * dt;
+      b.flapPhase += dt * 6;
+      if (b.x > 1.1) b.x -= 1.25; // wrap with a small buffer beyond the right edge
+    }
+  }
+
+  private drawBirds(ctx: CanvasRenderingContext2D, alpha: number): void {
+    if (this.birds.length === 0) return;
+    const { width, height } = this.state;
+    ctx.fillStyle = `rgba(20, 20, 28, ${(0.7 * alpha).toFixed(3)})`;
+    for (const b of this.birds) {
+      const bx = b.x * width;
+      const by = b.y * height;
+      const flap = Math.sin(b.flapPhase);
+      // Wings up vs. wings down — a 2-frame flap silhouette.
+      if (flap > 0) {
+        ctx.fillRect((bx | 0) - 3, (by | 0) - 1, 3, 1);
+        ctx.fillRect(bx | 0, (by | 0) - 1, 3, 1);
+      } else {
+        ctx.fillRect((bx | 0) - 3, by | 0, 3, 1);
+        ctx.fillRect(bx | 0, by | 0, 3, 1);
+      }
+    }
+  }
+
+  private drawFireflies(ctx: CanvasRenderingContext2D, alpha: number): void {
+    if (this.fireflies.length === 0) return;
+    const t = performance.now() / 1000;
+    const { width, height } = this.state;
+    const bandTop = height * 0.55;
+    const bandH = height * 0.20;
+    for (const f of this.fireflies) {
+      const fx = ((f.bx + Math.sin(t * 0.35 + f.driftPhase) * 24) % width + width) % width;
+      const fy = bandTop + (Math.sin(t * 0.7 + f.bobPhase) * 0.5 + 0.5) * bandH;
+      const blink = 0.5 + 0.5 * Math.sin(t * 2 + f.blinkPhase);
+      const a = blink * 0.7 * alpha;
+      if (a > 0.02) {
+        ctx.fillStyle = `rgba(232, 228, 140, ${a.toFixed(3)})`;
+        ctx.fillRect(fx | 0, fy | 0, 2, 2);
+      }
+    }
+  }
 }
 
 /**
@@ -825,6 +1011,30 @@ function starAlpha(h: number): number {
   if (h >= 20 || h <= 4) return 1;
   if (h > 18 && h < 20) return (h - 18) / 2; // dusk fade-in
   if (h > 4 && h < 6) return 1 - (h - 4) / 2; // dawn fade-out
+  return 0;
+}
+
+/** Aurora visibility — strongest in the deep-night window, off by day. */
+function auroraAlpha(h: number): number {
+  if (h >= 21 || h <= 4) return 1;
+  if (h > 19 && h < 21) return (h - 19) / 2;
+  if (h > 4 && h < 6) return 1 - (h - 4) / 2;
+  return 0;
+}
+
+/** Daytime creature alpha (birds) — eases in/out around the working day. */
+function dayCreatureAlpha(h: number): number {
+  if (h <= SUN_RISE - 0.5 || h >= SUN_SET + 0.5) return 0;
+  if (h < SUN_RISE + 1) return (h - (SUN_RISE - 0.5)) / 1.5;
+  if (h > SUN_SET - 1) return Math.max(0, ((SUN_SET + 0.5) - h) / 1.5);
+  return 1;
+}
+
+/** Firefly alpha — only after dark and not at the deepest part of night. */
+function fireflyAlpha(h: number): number {
+  if (h >= 19.5 && h < 23) return Math.min(1, (h - 19.5) / 1.5);
+  if (h >= 23 || h < 1) return 1;
+  if (h >= 1 && h < 3) return 1 - (h - 1) / 2;
   return 0;
 }
 
@@ -867,6 +1077,46 @@ function generateBolt(w: number, h: number): Array<[number, number]> {
     path.push([x, y]);
   }
   return path;
+}
+
+/**
+ * Build a procedural ridgeline as a polyline, sampled across the world's
+ * width. Each layer is seeded so its silhouette is stable between frames.
+ */
+function hillPath(
+  seed: number,
+  baseY: number,
+  amp: number,
+  segments: number,
+  width: number,
+): Array<[number, number]> {
+  let s = seed;
+  const r = (): number => {
+    s = (s * 9301 + 49297) % 233280;
+    return s / 233280;
+  };
+  const pts: Array<[number, number]> = [];
+  for (let i = 0; i <= segments; i++) {
+    const x = (i / segments) * width;
+    const y = baseY + Math.sin(i * 0.7 + r() * 3) * amp + r() * amp * 0.4;
+    pts.push([x, y]);
+  }
+  return pts;
+}
+
+/** Close a ridgeline polyline down to the bottom of the canvas and fill it. */
+function fillHillPath(
+  ctx: CanvasRenderingContext2D,
+  pts: Array<[number, number]>,
+  width: number,
+  height: number,
+): void {
+  ctx.beginPath();
+  ctx.moveTo(0, height);
+  for (const [x, y] of pts) ctx.lineTo(x, y);
+  ctx.lineTo(width, height);
+  ctx.closePath();
+  ctx.fill();
 }
 
 // ── Color helpers ────────────────────────────────────────────────────────

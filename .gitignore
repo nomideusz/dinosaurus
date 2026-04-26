@@ -5,3 +5,8 @@ dist
 .vite
 .env
 .env.local
+
+# Radio audio is hosted out-of-band (local files / Railway volume / object
+# storage) — never committed. The vite plugin in vite.config.ts builds a
+# manifest from whatever's present at dev/build time; an empty folder is OK.
+public/audio/radio/
