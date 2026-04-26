@@ -9,7 +9,8 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { dirname } from "node:path";
 
 import { Narrator } from "./narrator.mjs";
@@ -436,6 +437,217 @@ async function readJson(req) {
   return JSON.parse(Buffer.concat(chunks).toString("utf-8"));
 }
 
+// ── Radio (Navidrome / Subsonic) ─────────────────────────────────────────
+//
+// The dino's radio plays random tracks from per-channel Navidrome playlists.
+// Credentials live in env vars so they never reach the browser; the client
+// hits /radio/track to discover what to play next, then loads the audio
+// from /radio/stream/<id> which proxies the actual bytes from Navidrome
+// (with a Range header pass-through so the browser can seek).
+
+const NAVIDROME_URL = (process.env.NAVIDROME_URL ?? "").replace(/\/$/, "");
+const NAVIDROME_USER = process.env.NAVIDROME_USER ?? "";
+const NAVIDROME_PASSWORD = process.env.NAVIDROME_PASSWORD ?? "";
+const NAVIDROME_CONFIGURED = !!(NAVIDROME_URL && NAVIDROME_USER && NAVIDROME_PASSWORD);
+
+/**
+ * Maps each radio channel to the Navidrome playlist name we should pick
+ * from. Singular channel names (quake/fact/thought/bird) target plural
+ * playlists (quakes/facts/thoughts/birds) to match how a human user thinks
+ * about them. The "all" channel is the catch-all fallback for any empty
+ * channel-specific playlist.
+ */
+const RADIO_PLAYLIST = {
+  all: "all",
+  news: "news",
+  quake: "quakes",
+  history: "history",
+  fact: "facts",
+  thought: "thoughts",
+  space: "space",
+  bird: "birds",
+};
+
+/** Cache of all playlists. Refreshed every PLAYLIST_CACHE_MS — playlists
+ *  rarely change, but we want new ones to appear within ~30s of creation. */
+const PLAYLIST_CACHE_MS = 30_000;
+let playlistCache = null;
+let playlistCacheAt = 0;
+
+/** Cache of each playlist's track entries. Same TTL — adding songs to a
+ *  curated channel should appear quickly. */
+const PLAYLIST_CONTENTS_CACHE_MS = 30_000;
+const playlistContentsCache = new Map();
+
+function subsonicUrl(endpoint, extra = {}) {
+  if (!NAVIDROME_CONFIGURED) return null;
+  const salt = randomUUID().replace(/-/g, "").slice(0, 12);
+  const token = createHash("md5")
+    .update(NAVIDROME_PASSWORD + salt)
+    .digest("hex");
+  const params = new URLSearchParams({
+    u: NAVIDROME_USER,
+    t: token,
+    s: salt,
+    v: "1.16.1",
+    c: "dinosaurus",
+    f: "json",
+    ...extra,
+  });
+  return `${NAVIDROME_URL}/rest/${endpoint}?${params}`;
+}
+
+async function subsonicJson(endpoint, params = {}) {
+  const url = subsonicUrl(endpoint, params);
+  if (!url) throw new Error("navidrome not configured");
+  const resp = await fetch(url, { headers: { accept: "application/json" } });
+  if (!resp.ok) throw new Error(`navidrome ${endpoint}: HTTP ${resp.status}`);
+  const body = await resp.json();
+  const sub = body?.["subsonic-response"];
+  if (!sub || sub.status !== "ok") {
+    throw new Error(
+      `navidrome ${endpoint}: ${sub?.error?.message ?? "non-ok response"}`
+    );
+  }
+  return sub;
+}
+
+async function getAllPlaylists() {
+  const now = Date.now();
+  if (playlistCache && now - playlistCacheAt < PLAYLIST_CACHE_MS) return playlistCache;
+  const sub = await subsonicJson("getPlaylists.view");
+  // The Subsonic schema wraps the array under playlists.playlist.
+  playlistCache = Array.isArray(sub?.playlists?.playlist) ? sub.playlists.playlist : [];
+  playlistCacheAt = now;
+  return playlistCache;
+}
+
+async function getPlaylistEntries(playlistId) {
+  const cached = playlistContentsCache.get(playlistId);
+  const now = Date.now();
+  if (cached && now - cached.at < PLAYLIST_CONTENTS_CACHE_MS) return cached.entries;
+  const sub = await subsonicJson("getPlaylist.view", { id: playlistId });
+  const entries = Array.isArray(sub?.playlist?.entry) ? sub.playlist.entry : [];
+  playlistContentsCache.set(playlistId, { entries, at: now });
+  return entries;
+}
+
+/**
+ * Find the playlist whose name matches `targetName` (case-insensitive). The
+ * Subsonic API has no name-based lookup, so we scan the (cached) list.
+ */
+function findPlaylistByName(playlists, targetName) {
+  const target = targetName.toLowerCase();
+  return playlists.find((p) => typeof p?.name === "string" && p.name.toLowerCase() === target);
+}
+
+async function pickRandomEntry(channel, avoidId) {
+  const wanted = RADIO_PLAYLIST[channel];
+  if (!wanted) return { error: "unknown channel", status: 400 };
+
+  let playlists;
+  try {
+    playlists = await getAllPlaylists();
+  } catch (err) {
+    return { error: `navidrome unreachable: ${err.message}`, status: 502 };
+  }
+
+  let pl = findPlaylistByName(playlists, wanted);
+  let usedFallback = false;
+  if (!pl && wanted !== "all") {
+    pl = findPlaylistByName(playlists, "all");
+    usedFallback = true;
+  }
+  if (!pl) return { error: "no matching playlist", status: 503 };
+
+  let entries;
+  try {
+    entries = await getPlaylistEntries(pl.id);
+  } catch (err) {
+    return { error: `navidrome read failed: ${err.message}`, status: 502 };
+  }
+  if (entries.length === 0) {
+    if (!usedFallback && wanted !== "all") {
+      const allPl = findPlaylistByName(playlists, "all");
+      if (allPl) {
+        try {
+          entries = await getPlaylistEntries(allPl.id);
+          pl = allPl;
+          usedFallback = true;
+        } catch {
+          /* fall through to empty error */
+        }
+      }
+    }
+    if (entries.length === 0) return { error: "playlist is empty", status: 503 };
+  }
+
+  // Avoid replaying the same track twice in a row when there's a choice.
+  const choices = avoidId ? entries.filter((e) => String(e.id) !== avoidId) : entries;
+  const pool = choices.length > 0 ? choices : entries;
+  const entry = pool[Math.floor(Math.random() * pool.length)];
+  return {
+    entry: {
+      id: String(entry.id),
+      title: typeof entry.title === "string" ? entry.title : "",
+      artist: typeof entry.artist === "string" ? entry.artist : "",
+      album: typeof entry.album === "string" ? entry.album : "",
+      // Subsonic returns duration in whole seconds; convert to ms (or null).
+      durationMs: typeof entry.duration === "number" ? entry.duration * 1000 : null,
+    },
+    playlistName: pl?.name ?? wanted,
+    fallback: usedFallback,
+  };
+}
+
+/**
+ * Pipe a Subsonic stream through us so the credentials never reach the
+ * client. Forwards the Range header so the browser can seek; mirrors the
+ * status code (200 / 206) and the headers needed for media playback.
+ */
+function proxyStream(targetUrl, req, res) {
+  const u = new URL(targetUrl);
+  const transport = u.protocol === "https:" ? httpsRequest : httpRequest;
+  const upstream = transport(
+    {
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port || (u.protocol === "https:" ? 443 : 80),
+      path: `${u.pathname}${u.search}`,
+      method: "GET",
+      headers: req.headers.range ? { range: req.headers.range } : {},
+    },
+    (upRes) => {
+      setCors(req, res);
+      const passthrough = [
+        "content-type",
+        "content-length",
+        "content-range",
+        "accept-ranges",
+        "last-modified",
+        "etag",
+        "cache-control",
+      ];
+      const out = {};
+      for (const h of passthrough) {
+        const v = upRes.headers[h];
+        if (v !== undefined) out[h] = v;
+      }
+      res.writeHead(upRes.statusCode ?? 502, out);
+      upRes.pipe(res);
+    }
+  );
+  upstream.on("error", (err) => {
+    console.warn("[radio] stream proxy error:", err.message);
+    if (!res.headersSent) sendJson(req, res, 502, { error: "stream upstream failed" });
+    else res.destroy();
+  });
+  // If the client aborts (skips track / closes tab), tear down the upstream
+  // request so we're not pulling bytes nobody is listening to.
+  req.on("close", () => upstream.destroy());
+  upstream.end();
+}
+
 function validate(item) {
   if (!item || typeof item !== "object") return null;
   const { id, kind, text, href, linkLabel } = item;
@@ -498,6 +710,47 @@ const server = createServer(async (req, res) => {
         clearInterval(hb);
         sseClients.delete(client);
       });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/radio/track") {
+      if (!NAVIDROME_CONFIGURED) {
+        sendJson(req, res, 503, { error: "navidrome not configured" });
+        return;
+      }
+      const channel = url.searchParams.get("channel") ?? "all";
+      const avoid = url.searchParams.get("avoid") ?? null;
+      const result = await pickRandomEntry(channel, avoid);
+      if (result.error) {
+        sendJson(req, res, result.status, { error: result.error });
+        return;
+      }
+      // The stream URL points back at us — keeps Subsonic creds server-side.
+      sendJson(req, res, 200, {
+        ...result.entry,
+        url: `/radio/stream/${encodeURIComponent(result.entry.id)}`,
+        playlist: result.playlistName,
+        fallback: result.fallback,
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname.startsWith("/radio/stream/")) {
+      if (!NAVIDROME_CONFIGURED) {
+        sendJson(req, res, 503, { error: "navidrome not configured" });
+        return;
+      }
+      const id = decodeURIComponent(url.pathname.slice("/radio/stream/".length));
+      if (!id) {
+        sendJson(req, res, 400, { error: "missing id" });
+        return;
+      }
+      const target = subsonicUrl("stream.view", { id });
+      if (!target) {
+        sendJson(req, res, 503, { error: "navidrome not configured" });
+        return;
+      }
+      proxyStream(target, req, res);
       return;
     }
 

@@ -1687,9 +1687,10 @@ class RadioAudio {
   private hum: OscillatorNode | null = null;
   private musicGain: GainNode | null = null;
   private track: HTMLAudioElement | null = null;
-  /** URL of the track currently in `this.track`. Used so we can pick a
-   *  *different* random track when the current one ends. */
-  private currentTrackSrc: string | null = null;
+  /** Stable id of the current track — Subsonic song id when sourced from
+   *  the archive server, or the URL itself for local-fallback picks.
+   *  Sent as the `avoid` parameter so the server doesn't re-pick it. */
+  private currentTrackId: string | null = null;
   /** `ended` handler we attach so chained playback survives src changes. */
   private trackEndedHandler: (() => void) | null = null;
   private staticTimer: number | null = null;
@@ -1814,7 +1815,7 @@ class RadioAudio {
       this.track = null;
     }
     this.trackEndedHandler = null;
-    this.currentTrackSrc = null;
+    this.currentTrackId = null;
     this.musicGain?.disconnect();
     this.musicGain = null;
     this.musicEnabled = false;
@@ -1822,9 +1823,9 @@ class RadioAudio {
   }
 
   private async startTrack(channel: RadioChannel): Promise<boolean> {
-    const src = pickTrack(channel, null);
-    if (!src) return false;
-    const audio = new Audio(src);
+    const pick = await fetchTrack(channel, null);
+    if (!pick) return false;
+    const audio = new Audio(pick.url);
     // No `loop` — we chain a fresh random track on `ended` instead, so the
     // listener gets variety inside a channel.
     audio.volume = 0.42;
@@ -1834,7 +1835,7 @@ class RadioAudio {
     try {
       await audio.play();
       this.track = audio;
-      this.currentTrackSrc = src;
+      this.currentTrackId = pick.id;
       this.trackEndedHandler = onEnded;
       this.musicEnabled = true;
       this.musicChannel = channel;
@@ -1848,12 +1849,12 @@ class RadioAudio {
   /** Swap the playing track for a fresh random pick from the new channel. */
   private async switchTrack(channel: RadioChannel): Promise<void> {
     if (!this.track) return;
-    const next = pickTrack(channel, this.currentTrackSrc);
-    if (!next) return;
-    const absolute = new URL(next, window.location.href).href;
+    const pick = await fetchTrack(channel, this.currentTrackId);
+    if (!pick) return;
+    const absolute = new URL(pick.url, window.location.href).href;
     if (this.track.src === absolute) return;
-    this.track.src = next;
-    this.currentTrackSrc = next;
+    this.track.src = pick.url;
+    this.currentTrackId = pick.id;
     try {
       await this.track.play();
     } catch {
@@ -1863,17 +1864,22 @@ class RadioAudio {
   }
 
   /** Called when the current track ends — pick another random one in the
-   *  same channel (different URL when there's a choice) and start playing. */
-  private playNextRandom(): void {
+   *  same channel (different track than the one that just ended when
+   *  there's a choice) and start playing. */
+  private async playNextRandom(): Promise<void> {
     if (!this.musicEnabled || !this.track) return;
-    const next = pickTrack(this.musicChannel, this.currentTrackSrc);
-    if (!next) {
+    const pick = await fetchTrack(this.musicChannel, this.currentTrackId);
+    if (!pick) {
       this.stopMusic();
       return;
     }
-    this.track.src = next;
-    this.currentTrackSrc = next;
-    void this.track.play().catch(() => this.stopMusic());
+    this.track.src = pick.url;
+    this.currentTrackId = pick.id;
+    try {
+      await this.track.play();
+    } catch {
+      this.stopMusic();
+    }
   }
 
   private closeIfSilent(): void {
@@ -1991,23 +1997,65 @@ function channelScale(channel: RadioChannel): number[] {
   }
 }
 
+interface RadioPick {
+  /** Stable identifier — Subsonic song id from the archive server, or the
+   *  URL itself for local-fallback picks. Used to avoid replays. */
+  id: string;
+  /** Absolute or root-relative URL playable in an HTMLAudioElement. */
+  url: string;
+}
+
 /**
- * Pick a random track URL for the given channel. Falls back to the "all"
- * folder when the channel-specific one is empty (or unknown). When `avoid`
- * is supplied and there are at least two candidates, the chosen track is
- * guaranteed to differ — so successive plays don't repeat the same song.
+ * Resolve a random track for the given channel. Tries the archive server's
+ * Navidrome-backed `/radio/track` endpoint first; if that's unreachable
+ * (offline dev, archive down, navidrome not configured) falls back to the
+ * static manifest baked in at build time. When `avoid` is supplied and a
+ * choice exists, the result is guaranteed to differ.
  */
-function pickTrack(channel: RadioChannel, avoid: string | null): string | undefined {
+async function fetchTrack(
+  channel: RadioChannel,
+  avoid: string | null
+): Promise<RadioPick | undefined> {
+  if (ARCHIVE_API_URL) {
+    try {
+      const params = new URLSearchParams({ channel });
+      if (avoid) params.set("avoid", avoid);
+      const resp = await fetch(`${ARCHIVE_API_URL}/radio/track?${params}`, {
+        cache: "no-store",
+      });
+      if (resp.ok) {
+        const body = (await resp.json()) as {
+          id?: unknown;
+          url?: unknown;
+        };
+        if (typeof body.id === "string" && typeof body.url === "string") {
+          // Server returns a root-relative path like /radio/stream/<id>.
+          // Resolve against the archive origin so the audio element loads
+          // from the right host even when the page is on a different one.
+          const absolute = new URL(body.url, ARCHIVE_API_URL).href;
+          return { id: body.id, url: absolute };
+        }
+      }
+    } catch {
+      // Network / CORS / archive down — fall through to local manifest.
+    }
+  }
+  return pickLocalTrack(channel, avoid);
+}
+
+/** Static manifest pick — used for offline dev and as a server fallback. */
+function pickLocalTrack(channel: RadioChannel, avoid: string | null): RadioPick | undefined {
   const folder = RADIO_FOLDER[channel];
   let pool = RADIO_MANIFEST[folder] ?? [];
   if (pool.length === 0 && folder !== RADIO_FOLDER.all) {
     pool = RADIO_MANIFEST[RADIO_FOLDER.all] ?? [];
   }
   if (pool.length === 0) return undefined;
-  if (pool.length === 1) return pool[0];
+  if (pool.length === 1) return { id: pool[0], url: pool[0] };
   const candidates = avoid ? pool.filter((t) => t !== avoid) : pool;
   const list = candidates.length > 0 ? candidates : pool;
-  return list[Math.floor(Math.random() * list.length)];
+  const url = list[Math.floor(Math.random() * list.length)];
+  return { id: url, url };
 }
 
 let stylesInjected = false;
