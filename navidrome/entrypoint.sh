@@ -15,6 +15,13 @@
 
 set -e
 
+# Debug — print at startup so we can see who we are and what /app looks like
+echo "[entrypoint] who: $(id)"
+echo "[entrypoint] /app/navidrome:"
+ls -la /app/navidrome 2>&1 || echo "  (ls failed)"
+echo "[entrypoint] file /app/navidrome:"
+file /app/navidrome 2>&1 || echo "  (file not installed)"
+
 mkdir -p "$ND_MUSICFOLDER" "$ND_DATAFOLDER" "$ND_DATAFOLDER/syncthing"
 chmod -R 0777 "$ND_MUSICFOLDER" 2>/dev/null || true
 

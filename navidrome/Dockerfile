@@ -19,7 +19,7 @@ USER root
 RUN apk add --no-cache tini syncthing apache2-utils
 
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod 0755 /entrypoint.sh
+RUN chmod 0755 /entrypoint.sh /app/navidrome
 
 # Stay as root for the entrypoint. This works around a Railway-side container
 # quirk where a USER 1000-wrapping shell can't exec /app/navidrome even with
