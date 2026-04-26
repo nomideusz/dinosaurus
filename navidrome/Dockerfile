@@ -13,18 +13,18 @@ FROM deluan/navidrome:latest
 
 USER root
 
-# tini       — proper signal handling for the multi-process container
-# syncthing  — file sync daemon
+# tini          — signal handling for our multi-process container
+# syncthing     — file sync daemon
 # apache2-utils — provides htpasswd, used to bcrypt the Syncthing GUI password
 RUN apk add --no-cache tini syncthing apache2-utils
 
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod 0755 /entrypoint.sh /app/navidrome
+RUN chmod 0755 /entrypoint.sh
 
-# Run as the navidrome user (UID 1000) so files in the shared volume stay
-# owned by the same user that Navidrome reads them as. The chmod above
-# ensures the binary stays executable through any layer-rewriting that
-# adding apk packages might do.
-USER 1000:1000
+# Stay as root for the entrypoint. This works around a Railway-side container
+# quirk where a USER 1000-wrapping shell can't exec /app/navidrome even with
+# 0755 perms. Running both processes as root inside an isolated container is
+# acceptable here — the volume is private and the Navidrome data dir lives
+# entirely inside it.
 
 ENTRYPOINT ["/sbin/tini", "--", "/entrypoint.sh"]
