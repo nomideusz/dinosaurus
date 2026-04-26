@@ -789,9 +789,12 @@ async function syncOnePlaylist(name, libIds) {
 /**
  * Bring every radio playlist into agreement with the current library. Each
  * song's leading path segment routes it to the matching channel playlist
- * (`news/...` → news, `birds/...` → birds, etc.). Songs that don't match
- * any channel folder still land in `all`. Diffs against existing contents,
- * so re-running is cheap.
+ * (`news/...` → news, `birds/...` → birds, etc.). Tracks whose folder
+ * doesn't match a channel name fall back to a stable hash → channel
+ * mapping so every per-channel playlist still gets some music. Hashing on
+ * the song id keeps the assignment deterministic across re-runs. Every
+ * track also lands in `all`. Diffs against existing contents — cheap to
+ * re-run.
  */
 async function syncRadioPlaylists() {
   const songs = await searchAllSongs();
@@ -799,11 +802,23 @@ async function syncRadioPlaylists() {
     return { ok: false, reason: "library empty", songCount: 0 };
   }
 
+  const perChannel = SYNCABLE_PLAYLISTS.filter((n) => n !== "all");
   const buckets = Object.fromEntries(SYNCABLE_PLAYLISTS.map((n) => [n, []]));
+  let matched = 0;
+  let hashed = 0;
   for (const song of songs) {
     buckets.all.push(song.id);
     const head = song.path.split("/")[0]?.toLowerCase();
-    if (head && head !== "all" && buckets[head]) buckets[head].push(song.id);
+    if (head && head !== "all" && buckets[head]) {
+      buckets[head].push(song.id);
+      matched++;
+      continue;
+    }
+    let h = 0;
+    for (const c of song.id) h = ((h * 31) + c.charCodeAt(0)) | 0;
+    const ch = perChannel[Math.abs(h) % perChannel.length];
+    buckets[ch].push(song.id);
+    hashed++;
   }
 
   invalidatePlaylistCaches();
@@ -817,7 +832,13 @@ async function syncRadioPlaylists() {
   }
   invalidatePlaylistCaches();
 
-  return { ok: true, songCount: songs.length, playlists: results };
+  return {
+    ok: true,
+    songCount: songs.length,
+    routedByFolder: matched,
+    routedByHash: hashed,
+    playlists: results,
+  };
 }
 
 function validate(item) {
