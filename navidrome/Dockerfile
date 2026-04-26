@@ -19,10 +19,12 @@ USER root
 RUN apk add --no-cache tini syncthing apache2-utils
 
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN chmod 0755 /entrypoint.sh /app/navidrome
 
-# Match Navidrome's default UID/GID — keeps files in the volume owned by a
-# stable user across image rebuilds.
+# Run as the navidrome user (UID 1000) so files in the shared volume stay
+# owned by the same user that Navidrome reads them as. The chmod above
+# ensures the binary stays executable through any layer-rewriting that
+# adding apk packages might do.
 USER 1000:1000
 
 ENTRYPOINT ["/sbin/tini", "--", "/entrypoint.sh"]
