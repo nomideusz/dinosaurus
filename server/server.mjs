@@ -450,6 +450,9 @@ const NAVIDROME_USER = process.env.NAVIDROME_USER ?? "";
 const NAVIDROME_PASSWORD = process.env.NAVIDROME_PASSWORD ?? "";
 const NAVIDROME_CONFIGURED = !!(NAVIDROME_URL && NAVIDROME_USER && NAVIDROME_PASSWORD);
 
+/** Shared secret for the /admin/* endpoints. Empty disables them entirely. */
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? "";
+
 /**
  * Maps each radio channel to the Navidrome playlist name we should pick
  * from. Singular channel names (quake/fact/thought/bird) target plural
@@ -485,15 +488,23 @@ function subsonicUrl(endpoint, extra = {}) {
   const token = createHash("md5")
     .update(NAVIDROME_PASSWORD + salt)
     .digest("hex");
-  const params = new URLSearchParams({
-    u: NAVIDROME_USER,
-    t: token,
-    s: salt,
-    v: "1.16.1",
-    c: "dinosaurus",
-    f: "json",
-    ...extra,
-  });
+  const params = new URLSearchParams();
+  params.set("u", NAVIDROME_USER);
+  params.set("t", token);
+  params.set("s", salt);
+  params.set("v", "1.16.1");
+  params.set("c", "dinosaurus");
+  params.set("f", "json");
+  // Subsonic uses repeated keys for list params (e.g. songId=A&songId=B), so
+  // arrays expand into multiple appends rather than a comma-joined string.
+  for (const [k, v] of Object.entries(extra)) {
+    if (v == null) continue;
+    if (Array.isArray(v)) {
+      for (const item of v) params.append(k, String(item));
+    } else {
+      params.append(k, String(v));
+    }
+  }
   return `${NAVIDROME_URL}/rest/${endpoint}?${params}`;
 }
 
@@ -648,6 +659,130 @@ function proxyStream(targetUrl, req, res) {
   upstream.end();
 }
 
+/**
+ * Reset the playlist caches so the next /radio/track call re-reads from
+ * Navidrome. Used after we mutate playlists ourselves.
+ */
+function invalidatePlaylistCaches() {
+  playlistCache = null;
+  playlistCacheAt = 0;
+  playlistContentsCache.clear();
+}
+
+/**
+ * Page through Subsonic's search3 to enumerate every song in the library.
+ * Empty query returns all songs in Navidrome; we keep paging until a partial
+ * page tells us we've reached the end.
+ */
+async function searchAllSongIds() {
+  const PAGE = 500;
+  const ids = [];
+  let offset = 0;
+  // Cap iterations so a misbehaving server can't loop us forever.
+  for (let i = 0; i < 200; i++) {
+    const sub = await subsonicJson("search3.view", {
+      query: "",
+      songCount: PAGE,
+      songOffset: offset,
+      artistCount: 0,
+      albumCount: 0,
+    });
+    const songs = sub?.searchResult3?.song ?? [];
+    for (const s of songs) {
+      if (s?.id != null) ids.push(String(s.id));
+    }
+    if (songs.length < PAGE) break;
+    offset += PAGE;
+  }
+  return ids;
+}
+
+/**
+ * Bring the "all" playlist into agreement with the current library — every
+ * song in the library appears in the playlist exactly once. Diffs against
+ * the existing playlist so we only touch what changed (cheap to re-run).
+ */
+async function syncAllPlaylist() {
+  const libIds = await searchAllSongIds();
+  if (libIds.length === 0) {
+    return { action: "noop", reason: "library empty", songCount: 0 };
+  }
+
+  invalidatePlaylistCaches();
+  const playlists = await getAllPlaylists();
+  const existing = playlists.find(
+    (p) => typeof p?.name === "string" && p.name.toLowerCase() === "all"
+  );
+
+  let playlistId;
+  let action;
+  if (existing) {
+    playlistId = String(existing.id);
+    action = "updated";
+  } else {
+    // Subsonic's createPlaylist requires at least a name. Some clients also
+    // require an initial song; we send the first library track to be safe.
+    const created = await subsonicJson("createPlaylist.view", {
+      name: "all",
+      songId: libIds[0],
+    });
+    // Response shape varies — sometimes the new playlist comes back, sometimes
+    // not. Re-fetch the list to find it by name either way.
+    playlistId = created?.playlist?.id ? String(created.playlist.id) : null;
+    if (!playlistId) {
+      invalidatePlaylistCaches();
+      const refreshed = await getAllPlaylists();
+      const found = refreshed.find(
+        (p) => typeof p?.name === "string" && p.name.toLowerCase() === "all"
+      );
+      playlistId = found?.id ? String(found.id) : null;
+    }
+    if (!playlistId) throw new Error("created 'all' playlist but couldn't find its id");
+    action = "created";
+  }
+
+  const currentEntries = action === "updated" ? await getPlaylistEntries(playlistId) : [];
+  const libSet = new Set(libIds);
+  const currentIdSet = new Set(currentEntries.map((e) => String(e.id)));
+
+  const toAdd = libIds.filter((id) => !currentIdSet.has(id));
+  // Indices are recomputed against the original list; updatePlaylist treats
+  // them as positional, so we apply removals in descending order to keep
+  // earlier indices stable for the next chunk.
+  const toRemoveIndices = [];
+  currentEntries.forEach((e, i) => {
+    if (!libSet.has(String(e.id))) toRemoveIndices.push(i);
+  });
+  toRemoveIndices.sort((a, b) => b - a);
+
+  // Subsonic accepts repeated params, but URLs over ~4KB get rejected by
+  // some intermediaries — chunk so each request stays well under that.
+  const CHUNK = 80;
+  for (let i = 0; i < toRemoveIndices.length; i += CHUNK) {
+    const slice = toRemoveIndices.slice(i, i + CHUNK);
+    await subsonicJson("updatePlaylist.view", {
+      playlistId,
+      songIndexToRemove: slice,
+    });
+  }
+  for (let i = 0; i < toAdd.length; i += CHUNK) {
+    const slice = toAdd.slice(i, i + CHUNK);
+    await subsonicJson("updatePlaylist.view", {
+      playlistId,
+      songIdToAdd: slice,
+    });
+  }
+
+  invalidatePlaylistCaches();
+  return {
+    action,
+    playlistId,
+    songCount: libIds.length,
+    added: toAdd.length,
+    removed: toRemoveIndices.length,
+  };
+}
+
 function validate(item) {
   if (!item || typeof item !== "object") return null;
   const { id, kind, text, href, linkLabel } = item;
@@ -751,6 +886,34 @@ const server = createServer(async (req, res) => {
         return;
       }
       proxyStream(target, req, res);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/admin/refresh-all-playlist") {
+      if (!NAVIDROME_CONFIGURED) {
+        sendJson(req, res, 503, { error: "navidrome not configured" });
+        return;
+      }
+      if (!ADMIN_TOKEN) {
+        sendJson(req, res, 503, { error: "admin endpoint not configured" });
+        return;
+      }
+      const headerToken =
+        req.headers["x-admin-token"] ??
+        (typeof req.headers.authorization === "string"
+          ? req.headers.authorization.replace(/^Bearer\s+/i, "")
+          : "");
+      if (headerToken !== ADMIN_TOKEN) {
+        sendJson(req, res, 401, { error: "unauthorized" });
+        return;
+      }
+      try {
+        const result = await syncAllPlaylist();
+        sendJson(req, res, 200, { ok: true, ...result });
+      } catch (err) {
+        console.warn("[admin] refresh-all-playlist failed:", err.message);
+        sendJson(req, res, 502, { error: `refresh failed: ${err.message}` });
+      }
       return;
     }
 
