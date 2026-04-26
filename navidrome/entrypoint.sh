@@ -16,7 +16,11 @@
 set -e
 
 mkdir -p "$ND_MUSICFOLDER" "$ND_DATAFOLDER" "$ND_DATAFOLDER/syncthing"
-chmod -R 0777 "$ND_MUSICFOLDER" 2>/dev/null || true
+# Ensure the music directory itself is writable, but never touch existing
+# files — a recursive chmod on every boot causes Syncthing to detect
+# permission changes on the whole library and prompt the local peer to
+# revert. Both processes run as root, so this is just belt-and-suspenders.
+chmod 0777 "$ND_MUSICFOLDER" 2>/dev/null || true
 
 ST_HOME="$ND_DATAFOLDER/syncthing"
 : "${SYNCTHING_USER:=admin}"
