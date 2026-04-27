@@ -1248,3 +1248,31 @@ function scheduleNextThought(delay) {
   }, delay).unref?.();
 }
 scheduleNextThought(THOUGHT_INITIAL_DELAY_MS);
+
+// Auto-sync radio playlists shortly after boot and periodically thereafter
+// so the `all` playlist tracks the live Navidrome library without anyone
+// having to call /admin/refresh-playlists by hand. Set PLAYLIST_SYNC_INTERVAL_MS
+// to 0 to disable both the boot sync and the periodic refresh.
+const PLAYLIST_SYNC_INTERVAL_MS = Number(
+  process.env.PLAYLIST_SYNC_INTERVAL_MS ?? 15 * 60_000
+);
+const PLAYLIST_SYNC_BOOT_DELAY_MS = 30_000;
+async function autoSyncPlaylists(reason) {
+  try {
+    const result = await syncRadioPlaylists();
+    if (result?.ok) {
+      console.log(`[playlists] auto-sync (${reason}): ${result.songCount} songs`);
+    } else {
+      console.warn(`[playlists] auto-sync (${reason}) skipped:`, result?.reason ?? "unknown");
+    }
+  } catch (err) {
+    console.warn(`[playlists] auto-sync (${reason}) failed:`, err?.message ?? err);
+  }
+}
+if (NAVIDROME_CONFIGURED && PLAYLIST_SYNC_INTERVAL_MS > 0) {
+  setTimeout(() => void autoSyncPlaylists("boot"), PLAYLIST_SYNC_BOOT_DELAY_MS).unref?.();
+  setInterval(
+    () => void autoSyncPlaylists("scheduled"),
+    PLAYLIST_SYNC_INTERVAL_MS
+  ).unref?.();
+}

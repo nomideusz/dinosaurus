@@ -58,6 +58,10 @@ Archive runtime variables:
   radio. Unset disables `/radio/*`.
 - `ADMIN_TOKEN`: shared secret for `/admin/refresh-playlists`. Empty disables
   admin endpoints entirely.
+- `PLAYLIST_SYNC_INTERVAL_MS`: how often the archive auto-syncs the `all`
+  playlist with the live Navidrome library. Defaults to `900000` (15 min);
+  the archive also runs one sync ~30 s after boot. Set to `0` to disable
+  both the boot sync and the periodic refresh.
 - `ANTHROPIC_API_KEY`: optional; enables the `musings` source (Claude Haiku
   generates dino thoughts ~once an hour). Without it the source is skipped.
 
