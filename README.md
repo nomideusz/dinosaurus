@@ -78,10 +78,10 @@ console warning pointing at these variables.
 
 The bottom-of-page strip is a working audio player that streams tracks from a
 Navidrome library. The user picks a channel (`all`, `news`, `quakes`, `facts`,
-`thoughts`, `space`, `birds`) and a pace (`chill`, `normal`, `busy`).
-Preferences are anonymous, saved in `localStorage`, and sent to `/realtime`
-for the current socket only. Pace also throttles how cards spawn so the dino
-never gets overwhelmed.
+`space`, `birds`) and a pace (`chill`, `normal`, `busy`). Preferences are
+anonymous, saved in `localStorage`, and sent to `/realtime` for the current
+socket only. Pace also throttles how cards spawn so the dino never gets
+overwhelmed.
 
 Audio flows through the archive server: the client calls `/radio/track` for
 the next track id, then `/radio/stream/<id>` to play the bytes. The archive
@@ -92,10 +92,22 @@ Per-channel playlists are hand-curated in Navidrome's UI. The
 `POST /admin/refresh-playlists` endpoint (auth via `X-Admin-Token`) mirrors
 the entire library into the `all` playlist and ensures an empty shell exists
 for every per-channel playlist matching a category bin (`news`, `quakes`,
-`facts`, `thoughts`, `space`, `birds`). Existing per-channel contents are
-never touched — only the names are guaranteed to be present so you have
-ready destinations to drag tracks into. The runtime picker falls back to
-`all` whenever a per-channel playlist is missing or empty.
+`facts`, `space`, `birds`). Existing per-channel contents are never touched
+— only the names are guaranteed to be present so you have ready destinations
+to drag tracks into. The runtime picker falls back to `all` whenever a
+per-channel playlist is missing or empty.
+
+## Dino thoughts (speech bubble)
+
+In the original cut, the dino's musings were just another card kind sorted
+into a `thoughts` bin. They aren't first-class content though — they're
+flavour. The server now keeps a slow ticker driven by `server/sources/musings.mjs`
+(Claude Haiku when `ANTHROPIC_API_KEY` is set, hand-written fallback pool
+otherwise) and broadcasts each line as a `dino_thought` event over SSE/WS
+every ~90–150s. The client renders it as a brief speech bubble anchored
+above the dino's head (`src/dinoBubble.ts`), then fades out — no card, no
+courier, no archive. The pattern detector in `messages.ts` also funnels its
+"i keep hearing about X" observations into the same bubble.
 
 ## What's inside
 
@@ -104,6 +116,7 @@ src/
 ├── main.ts            # entry point + courier loop (dino ↔ messages)
 ├── world.ts           # animated sky, sun/moon, clouds, hills, ground
 ├── dino.ts            # dino entity + tiny state machine (wander/seek/carry/deliver)
+├── dinoBubble.ts      # ephemeral speech bubble for dino_thought events
 ├── sprite.ts          # programmatic pixel-art frames (no image files)
 ├── messages.ts        # floating message cards + category bins (DOM overlay)
 ├── weather.ts         # per-visitor weather card + ambient sky state

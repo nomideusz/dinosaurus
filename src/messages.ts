@@ -90,6 +90,8 @@ export interface MessageWorldOptions {
   onRadioChange?: (prefs: RadioPreferences) => void;
   /** Called sparingly when the local radio queue starts backing up. */
   onBacklogPressure?: (pendingCount: number) => void;
+  /** An ephemeral dino thought arrived from the server — render a speech bubble. */
+  onDinoThought?: (text: string) => void;
 }
 
 /**
@@ -106,15 +108,15 @@ const ARCHIVE_REFRESH_INTERVAL_MS = 60_000;
 const CARD_SPAWN_GAP_MS = 2_500;
 
 // Pattern reactions: the dino notices when the same word keeps coming up
-// in incoming items and spins out a small "thought" of its own. Tuned to
-// be quietly observant, not chatty.
+// in incoming items and pipes a small observation into the speech bubble.
+// Tuned to be quietly observant, not chatty.
 const PATTERN_COOLDOWN_MS = 90_000;
 const PATTERN_WINDOW_MS = 15 * 60_000;
 const PATTERN_BUFFER_MAX = 32;
 const PATTERN_MIN_ITEMS = 5;
 const PATTERN_MIN_DOC_COUNT = 3;
 const RADIO_STORAGE_KEY = "dinosaurus.radio.v1";
-const RADIO_CHANNELS = ["news", "quake", "fact", "thought", "space", "bird"] as const;
+const RADIO_CHANNELS = ["news", "quake", "fact", "space", "bird"] as const;
 type RadioChannel = "all" | (typeof RADIO_CHANNELS)[number];
 
 /**
@@ -127,7 +129,6 @@ const RADIO_FOLDER: Record<RadioChannel, string> = {
   news: "news",
   quake: "quakes",
   fact: "facts",
-  thought: "thoughts",
   space: "space",
   bird: "birds",
 };
@@ -155,6 +156,7 @@ export class MessageWorld {
   private readonly onSpawn?: (item: ContentItem) => void;
   private readonly onRadioChange?: (prefs: RadioPreferences) => void;
   private readonly onBacklogPressure?: (pendingCount: number) => void;
+  private readonly onDinoThought?: (text: string) => void;
   private archiveWarningShown = false;
   private realtime: WebSocket | null = null;
   private realtimeConnected = false;
@@ -168,9 +170,6 @@ export class MessageWorld {
   private readonly recentForPattern: Array<{ kind: ContentKind; text: string; at: number }> = [];
   private lastPatternAt = 0;
   private lastPatternWord = "";
-  /** IDs of locally-synthesised pattern cards — skipped from pattern recording
-   *  to avoid the dino observing its own observations. */
-  private readonly syntheticPatternIds = new Set<string>();
 
   constructor(
     parent: HTMLElement,
@@ -183,6 +182,7 @@ export class MessageWorld {
     this.onSpawn = opts.onSpawn;
     this.onRadioChange = opts.onRadioChange;
     this.onBacklogPressure = opts.onBacklogPressure;
+    this.onDinoThought = opts.onDinoThought;
     this.worldW = worldW;
     this.worldH = worldH;
     this.maxConcurrent = opts.maxConcurrent ?? 3;
@@ -303,8 +303,6 @@ export class MessageWorld {
    * dino from "delivering" cards that would just be duplicates server-side.
    */
   spawn(item: ContentItem): FloatingMessage | null {
-    const isSynthetic = this.syntheticPatternIds.has(item.id);
-    if (isSynthetic) this.syntheticPatternIds.delete(item.id);
     if (this.messages.has(item.id)) return this.messages.get(item.id) ?? null;
     if (this.isInArchive(item.id)) return null;
     if (this.messages.size >= this.maxConcurrent) return null;
@@ -387,12 +385,8 @@ export class MessageWorld {
     this.onSpawn?.(item);
     this.radioAudio.item(item.kind);
 
-    // Pattern detection runs on real items only — synthetic pattern cards
-    // shouldn't observe themselves into a feedback loop.
-    if (!isSynthetic) {
-      this.recordForPattern(item);
-      this.maybeSpawnPattern(item.kind);
-    }
+    this.recordForPattern(item);
+    this.maybeEmitPatternThought(item.kind);
     return msg;
   }
 
@@ -407,7 +401,8 @@ export class MessageWorld {
     }
   }
 
-  private maybeSpawnPattern(kind: ContentKind): void {
+  private maybeEmitPatternThought(kind: ContentKind): void {
+    if (!this.onDinoThought) return;
     const now = performance.now();
     if (now - this.lastPatternAt < PATTERN_COOLDOWN_MS) return;
 
@@ -421,26 +416,9 @@ export class MessageWorld {
     if (!top || top.docCount < PATTERN_MIN_DOC_COUNT) return;
     if (top.word === this.lastPatternWord) return;
 
-    // Don't fire a pattern card if the thoughts bin already shows one — would
-    // crowd the same observation against itself.
-    if (!this.binFor("thought")) return;
-
     this.lastPatternAt = now;
     this.lastPatternWord = top.word;
-
-    const id = `${SYNTHETIC_PATTERN_PREFIX}${Date.now().toString(36)}:${top.word}`;
-    this.syntheticPatternIds.add(id);
-    const text = patternPhrase(top.word, top.docCount, kind);
-    const spawned = this.spawn({
-      id,
-      kind: "thought",
-      text,
-      publishedAt: Date.now(),
-      score: 0.55,
-    });
-    // If the spawn was rejected (already in archive, max concurrent, etc.),
-    // discard the synthetic id so the set doesn't leak.
-    if (!spawned) this.syntheticPatternIds.delete(id);
+    this.onDinoThought(patternPhrase(top.word, top.docCount, kind));
   }
 
   /**
@@ -519,12 +497,8 @@ export class MessageWorld {
     bin.count = bin.delivered.length;
     updateBinCountUI(bin);
     if (this.archiveOverlay) this.archiveOverlay.refreshIfShowing(bin);
-    // Pattern cards are local-only — the server never saw them, so don't
-    // try to sync them. They live in the visitor's archive only.
-    if (!isSyntheticPatternId(newItem.id)) {
-      if (this.realtimeConnected) this.sendRealtime({ type: "deliver", id: newItem.id });
-      else void this.pushDelivery(newItem);
-    }
+    if (this.realtimeConnected) this.sendRealtime({ type: "deliver", id: newItem.id });
+    else void this.pushDelivery(newItem);
     bumpBin(bin);
     return true;
   }
@@ -670,7 +644,6 @@ export class MessageWorld {
       { value: "news", label: "news" },
       { value: "quake", label: "quakes" },
       { value: "fact", label: "facts" },
-      { value: "thought", label: "thoughts" },
       { value: "space", label: "space" },
       { value: "bird", label: "birds" },
     ];
@@ -907,6 +880,7 @@ export class MessageWorld {
       id?: unknown;
       ids?: unknown;
       reason?: unknown;
+      text?: unknown;
     };
     switch (obj.type) {
       case "hello":
@@ -947,6 +921,11 @@ export class MessageWorld {
       case "items_expired":
         if (Array.isArray(obj.ids)) {
           this.applyExpiredIds(obj.ids.filter((x): x is string => typeof x === "string"));
+        }
+        return;
+      case "dino_thought":
+        if (typeof obj.text === "string" && obj.text.length > 0) {
+          this.onDinoThought?.(obj.text);
         }
         return;
       default:
@@ -1094,10 +1073,7 @@ export class MessageWorld {
       const before = bin.count;
       // Trust the server's ordering (newest first), but still prune in case
       // the client clock disagrees enough to keep something past the TTL.
-      // Locally-synthesised pattern cards are preserved — the server doesn't
-      // know about them and would otherwise wipe them on every snapshot.
-      const localOnly = bin.delivered.filter((d) => isSyntheticPatternId(d.id));
-      bin.delivered = [...localOnly, ...list];
+      bin.delivered = [...list];
       pruneExpired(bin);
       bin.count = bin.delivered.length;
       updateBinCountUI(bin);
@@ -1463,8 +1439,6 @@ function kindLabel(kind: ContentKind): string {
       return "weather";
     case "fact":
       return "fact";
-    case "thought":
-      return "thought";
     case "quake":
       return "quake";
     case "space":
@@ -1482,8 +1456,6 @@ function kindIcon(kind: ContentKind): string {
       return "⛅";
     case "fact":
       return "❍";
-    case "thought":
-      return "✦";
     case "quake":
       return "↯";
     case "space":
@@ -1502,8 +1474,6 @@ function stampLabelFor(kind: ContentKind): string {
       return "usgs";
     case "fact":
       return "field note";
-    case "thought":
-      return "scratch";
     case "space":
       return "nasa";
     case "bird":
@@ -1514,13 +1484,6 @@ function stampLabelFor(kind: ContentKind): string {
 }
 
 // ── Pattern detection helpers ────────────────────────────────────────────
-
-/** Synthetic pattern-card ids carry this prefix so the rest of the system
- *  can recognise them and skip server sync / preserve across snapshots. */
-const SYNTHETIC_PATTERN_PREFIX = "__pattern__:";
-function isSyntheticPatternId(id: string): boolean {
-  return id.startsWith(SYNTHETIC_PATTERN_PREFIX);
-}
 
 const STOP_WORDS = new Set([
   // articles + conjunctions
@@ -1948,8 +1911,6 @@ function channelFrequency(channel: RadioChannel): number {
       return 98;
     case "fact":
       return 148;
-    case "thought":
-      return 174;
     case "space":
       return 88;
     case "bird":
@@ -1972,8 +1933,6 @@ function channelScale(channel: RadioChannel): number[] {
       return [root, root * 1.2, root * 1.33, root * 1.6, root * 1.33, root * 1.2];
     case "fact":
       return [root, root * 1.25, root * 1.5, root * 1.875, root * 1.5, root * 1.25];
-    case "thought":
-      return [root, root * 1.2, root * 1.5, root * 1.8, root * 1.5, root * 1.2];
     case "space":
       // Wider, slower-feeling intervals — more "drift" in the synth scale.
       return [root, root * 1.5, root * 2, root * 3, root * 2, root * 1.5];
@@ -2155,7 +2114,6 @@ function injectStylesOnce(): void {
     .msg--news    { --accent: #ff9a73; }
     .msg--weather { --accent: #7ec8ff; }
     .msg--fact    { --accent: #8dd9a8; }
-    .msg--thought { --accent: #c8a8ff; }
     .msg--quake   { --accent: #f3c969; }
     .msg--space   { --accent: #9eb5ff; }
     .msg--bird    { --accent: #e0a8c0; }
@@ -2416,7 +2374,6 @@ function injectStylesOnce(): void {
     .bin--news    { --accent: #ff9a73; }
     .bin--weather { --accent: #7ec8ff; }
     .bin--fact    { --accent: #8dd9a8; }
-    .bin--thought { --accent: #c8a8ff; }
     .bin--quake   { --accent: #f3c969; }
     .bin--space   { --accent: #9eb5ff; }
     .bin--bird    { --accent: #e0a8c0; }
@@ -2461,7 +2418,6 @@ function injectStylesOnce(): void {
     .archive-panel[data-kind="news"]    { --accent: #ff9a73; border-top: 4px solid var(--accent); }
     .archive-panel[data-kind="weather"] { --accent: #7ec8ff; border-top: 4px solid var(--accent); }
     .archive-panel[data-kind="fact"]    { --accent: #8dd9a8; border-top: 4px solid var(--accent); }
-    .archive-panel[data-kind="thought"] { --accent: #c8a8ff; border-top: 4px solid var(--accent); }
     .archive-panel[data-kind="quake"]   { --accent: #f3c969; border-top: 4px solid var(--accent); }
     .archive-panel[data-kind="space"]   { --accent: #9eb5ff; border-top: 4px solid var(--accent); }
     .archive-panel[data-kind="bird"]    { --accent: #e0a8c0; border-top: 4px solid var(--accent); }

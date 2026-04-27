@@ -42,12 +42,11 @@ const ALLOWED_KINDS = new Set([
   "news",
   "weather",
   "fact",
-  "thought",
   "quake",
   "space",
   "bird",
 ]);
-const DEFAULT_CHANNELS = ["news", "fact", "thought", "quake", "space", "bird"];
+const DEFAULT_CHANNELS = ["news", "fact", "quake", "space", "bird"];
 const PACES = new Set(["chill", "normal", "busy"]);
 
 /**
@@ -76,16 +75,14 @@ const bins = new Map();
 const activeItems = new Map();
 
 /**
- * Rolling window of recent non-thought items the narrator has emitted. Read
- * by the Musings source so Claude can ground the dino's thoughts in what's
- * actually been in the air. Thoughts are excluded so the dino doesn't end up
- * reflecting on its own previous reflections.
+ * Rolling window of recent items the narrator has emitted. Read by the
+ * Musings source so Claude can ground the dino's thoughts in what's
+ * actually been in the air.
  */
 const RECENT_ITEMS_MAX = 16;
 /** @type {Array<{ kind: string, text: string }>} */
 const recentSpokenItems = [];
 function pushRecentItem(item) {
-  if (item.kind === "thought") return;
   recentSpokenItems.push({ kind: item.kind, text: item.text });
   if (recentSpokenItems.length > RECENT_ITEMS_MAX) recentSpokenItems.shift();
 }
@@ -453,8 +450,8 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? "";
 
 /**
  * Maps each radio channel to the Navidrome playlist name we should pick
- * from. Singular channel names (quake/fact/thought/bird) target plural
- * playlists (quakes/facts/thoughts/birds) to match how a human user thinks
+ * from. Singular channel names (quake/fact/bird) target plural
+ * playlists (quakes/facts/birds) to match how a human user thinks
  * about them. The "all" channel is the catch-all fallback for any empty
  * channel-specific playlist.
  */
@@ -463,7 +460,6 @@ const RADIO_PLAYLIST = {
   news: "news",
   quake: "quakes",
   fact: "facts",
-  thought: "thoughts",
   space: "space",
   bird: "birds",
 };
@@ -1218,12 +1214,37 @@ narrator.registerSource(HackerNews);
 narrator.registerSource(DevTo);
 narrator.registerSource(Quakes);
 narrator.registerSource(Facts);
-narrator.registerSource(
-  createMusings({
-    apiKey: process.env.ANTHROPIC_API_KEY,
-    getRecentItems: () => recentSpokenItems.slice(),
-  })
-);
 narrator.registerSource(Space);
 narrator.registerSource(createBirds());
 narrator.start();
+
+// Dino thoughts are ephemeral: pulled off a buffer on a slow cadence and
+// broadcast to every connected client as `dino_thought` events. Clients
+// render them as a brief speech bubble above the dino — no card, no bin,
+// no archive entry.
+const THOUGHT_INTERVAL_BASE_MS = 90_000;
+const THOUGHT_INTERVAL_JITTER_MS = 60_000;
+const THOUGHT_INITIAL_DELAY_MS = 12_000;
+const musings = createMusings({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  getRecentItems: () => recentSpokenItems.slice(),
+});
+async function broadcastDinoThought() {
+  try {
+    const text = await musings.next();
+    if (!text) return;
+    broadcastEvent({ type: "dino_thought", text });
+    broadcastRealtime({ type: "dino_thought", text });
+  } catch (err) {
+    console.warn("[musings] thought broadcast failed:", err?.message ?? err);
+  }
+}
+function scheduleNextThought(delay) {
+  setTimeout(() => {
+    void broadcastDinoThought();
+    scheduleNextThought(
+      THOUGHT_INTERVAL_BASE_MS + Math.random() * THOUGHT_INTERVAL_JITTER_MS
+    );
+  }, delay).unref?.();
+}
+scheduleNextThought(THOUGHT_INITIAL_DELAY_MS);

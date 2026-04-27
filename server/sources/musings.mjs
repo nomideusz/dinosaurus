@@ -2,8 +2,9 @@
 // Claude Haiku 4.5 to write small fresh thoughts in the dino's voice, given
 // a list of items the dino has recently been sorting (so musings can quietly
 // reference what's been in the air). Without a key — or if the API call
-// fails — we fall back to a stable hand-written pool. The narrator dedupes
-// by id, so every batch carries a unique batch timestamp in the id.
+// fails — we fall back to a stable hand-written pool. Thoughts are now
+// ephemeral: the server pulls one off the buffer on a slow cadence and
+// broadcasts it to clients as a `dino_thought` event for the speech bubble.
 
 import Anthropic from "@anthropic-ai/sdk";
 
@@ -50,9 +51,13 @@ const MAX_TOKENS = 1024;
 const MAX_LINE_CHARS = 200;
 
 /**
- * Build the Musings source. `apiKey` is optional — without it (or on any
- * Claude call failure) the source returns the static FALLBACK pool, so the
- * dino keeps talking when offline.
+ * Build the Musings buffer. `apiKey` is optional — without it (or on any
+ * Claude call failure) the buffer is filled from the static FALLBACK pool,
+ * so the dino keeps talking when offline.
+ *
+ * Returns an object with `next(signal)` that yields one thought string at a
+ * time. Internally the buffer is refilled when it runs low or when the last
+ * Claude call is older than REFRESH_EVERY_MS.
  *
  * @param {{
  *   apiKey?: string,
@@ -64,48 +69,63 @@ export function createMusings(opts = {}) {
   const { apiKey, getRecentItems, model = DEFAULT_MODEL } = opts;
   const client = apiKey ? new Anthropic({ apiKey }) : null;
 
-  return {
-    name: "musings",
-    refreshEveryMs: REFRESH_EVERY_MS,
-    /** @param {AbortSignal} signal */
-    async fetchItems(signal) {
-      const now = Date.now();
-      if (!client) return staticBatch(now);
+  const buffer = [];
+  let lastRefreshAt = 0;
+  let refreshing = null;
 
+  function fillFromFallback() {
+    buffer.push(...shuffle([...FALLBACK]));
+    lastRefreshAt = Date.now();
+  }
+
+  async function refresh(signal) {
+    if (refreshing) return refreshing;
+    refreshing = (async () => {
       try {
-        const recent = (getRecentItems?.() ?? []).slice(0, 12);
-        const lines = await generateThoughts(client, model, recent, signal);
-        if (lines.length === 0) return staticBatch(now);
-        return lines.map((text, i) => ({
-          id: `musing:${now.toString(36)}:${i}`,
-          kind: "thought",
-          text,
-          publishedAt: now,
-          // Slightly above fallback so live thoughts get picked first when both
-          // are in the pool.
-          score: 0.32 + Math.random() * 0.08,
-        }));
-      } catch (err) {
-        if (err && err.name !== "AbortError") {
-          console.warn(
-            "[musings] Claude call failed; falling back to static pool:",
-            err?.message ?? err
-          );
+        if (!client) {
+          fillFromFallback();
+          return;
         }
-        return staticBatch(now);
+        try {
+          const recent = (getRecentItems?.() ?? []).slice(0, 12);
+          const lines = await generateThoughts(client, model, recent, signal);
+          if (lines.length === 0) {
+            fillFromFallback();
+            return;
+          }
+          buffer.push(...lines);
+          lastRefreshAt = Date.now();
+        } catch (err) {
+          if (err && err.name !== "AbortError") {
+            console.warn(
+              "[musings] Claude call failed; falling back to static pool:",
+              err?.message ?? err
+            );
+          }
+          fillFromFallback();
+        }
+      } finally {
+        refreshing = null;
       }
+    })();
+    return refreshing;
+  }
+
+  return {
+    /**
+     * Return the next thought, or null if the buffer is empty (and we
+     * couldn't refill it). Callers may pass an AbortSignal to abort the
+     * underlying Claude call if it's still in flight.
+     */
+    async next(signal) {
+      const stale = Date.now() - lastRefreshAt > REFRESH_EVERY_MS;
+      if (buffer.length === 0 || stale) {
+        await refresh(signal);
+      }
+      if (buffer.length === 0) return null;
+      return buffer.shift();
     },
   };
-}
-
-function staticBatch(now) {
-  return FALLBACK.map((text, i) => ({
-    id: `musing:fallback:${i}`,
-    kind: "thought",
-    text,
-    publishedAt: now,
-    score: 0.18 + Math.random() * 0.05,
-  }));
 }
 
 async function generateThoughts(client, model, recentItems, signal) {
@@ -143,4 +163,12 @@ Write ${TARGET_BATCH} fresh thoughts. One per line, nothing else.`;
     .map((l) => l.replace(/^\d+[.)\s]+/, ""))
     .map((l) => l.replace(/^["“]+|["”]+$/g, ""))
     .filter((l) => l.length > 0 && l.length <= MAX_LINE_CHARS);
+}
+
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
 }

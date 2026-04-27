@@ -6,7 +6,6 @@ export type ContentKind =
   | "news"
   | "weather"
   | "fact"
-  | "thought"
   | "quake"
   | "space"
   | "bird";

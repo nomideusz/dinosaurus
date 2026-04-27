@@ -8,6 +8,7 @@
 
 import { Dino, type Mood } from "./dino.js";
 import { DinoAmbient } from "./dinoBehavior.js";
+import { DinoBubble } from "./dinoBubble.js";
 import { MessageWorld, type FloatingMessage } from "./messages.js";
 import type { ContentKind } from "./services/content.js";
 import { WeatherClient } from "./weather.js";
@@ -54,6 +55,7 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
   // Ambient mood layer — yawns at night, shivers in snow, lies down when bored.
   // Reads weather + clock + idle timer; reacts only when the dino isn't busy.
   const ambient = new DinoAmbient(dino, () => weather.conditions());
+  const bubble = new DinoBubble(stage, dino);
 
   const messages = new MessageWorld(
     stage,
@@ -61,7 +63,6 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
       { kind: "news", label: "news", icon: "▤" },
       { kind: "quake", label: "quakes", icon: "↯" },
       { kind: "fact", label: "facts", icon: "❍" },
-      { kind: "thought", label: "thoughts", icon: "✦" },
       { kind: "space", label: "space", icon: "☄" },
       { kind: "bird", label: "birds", icon: "Λ" },
     ],
@@ -76,6 +77,10 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
       },
       onRadioChange: () => dino.react("curious", 900),
       onBacklogPressure: () => dino.react("sad", 900),
+      onDinoThought: (text) => {
+        bubble.show(text);
+        dino.react("happy", 800);
+      },
     }
   );
 
@@ -120,6 +125,7 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
     courier.update(now);
     messages.update(now);
     ambient.update(now);
+    bubble.update();
 
     requestAnimationFrame(frame);
   }
@@ -261,8 +267,6 @@ function deliveryMoodFor(kind: ContentKind): Mood {
       return "happy";
     case "fact":
       return "surprised"; // TIL!
-    case "thought":
-      return "happy";
     case "quake":
       return "angry"; // the earth shaking is alarming
     case "space":
