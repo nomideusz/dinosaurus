@@ -595,6 +595,26 @@ async function getPlaylistEntries(playlistId) {
   return entries;
 }
 
+const INTERNET_RADIO_CACHE_MS = 5 * 60_000;
+let internetStationsCache = null;
+let internetStationsCacheAt = 0;
+
+async function getInternetRadioStations() {
+  const now = Date.now();
+  if (internetStationsCache && now - internetStationsCacheAt < INTERNET_RADIO_CACHE_MS) {
+    return internetStationsCache;
+  }
+  const sub = await subsonicJson("getInternetRadioStations.view");
+  const list = sub?.internetRadioStations?.internetRadioStation;
+  internetStationsCache = Array.isArray(list) ? list : [];
+  internetStationsCacheAt = now;
+  return internetStationsCache;
+}
+
+function findInternetRadioStation(id) {
+  return (internetStationsCache ?? []).find((s) => String(s?.id) === String(id));
+}
+
 /**
  * Find the playlist whose name matches `targetName` (case-insensitive). The
  * Subsonic API has no name-based lookup, so we scan the (cached) list.
@@ -607,6 +627,37 @@ function findPlaylistByName(playlists, targetName) {
 async function pickRandomEntry(channel, avoidId) {
   const wanted = RADIO_PLAYLIST[channel];
   if (!wanted) return { error: "unknown channel", status: 400 };
+
+  // News streams come from Navidrome's Internet Radio list (continuous live
+  // streams) rather than a track playlist. Falls through to the playlist
+  // path if no stations are configured or the request fails.
+  if (channel === "news") {
+    let stations = [];
+    try {
+      stations = await getInternetRadioStations();
+    } catch (err) {
+      console.warn("[radio] internet radio list failed:", err.message);
+    }
+    if (stations.length > 0) {
+      const choices = avoidId
+        ? stations.filter((s) => `internet:${s.id}` !== avoidId)
+        : stations;
+      const pool = choices.length > 0 ? choices : stations;
+      const station = pool[Math.floor(Math.random() * pool.length)];
+      return {
+        entry: {
+          id: `internet:${station.id}`,
+          title: typeof station.name === "string" ? station.name : "live radio",
+          artist: "internet radio",
+          album: "",
+          durationMs: null,
+        },
+        url: `/radio/stream/internet/${encodeURIComponent(String(station.id))}`,
+        playlistName: "news (live)",
+        fallback: false,
+      };
+    }
+  }
 
   let playlists;
   try {
@@ -1094,12 +1145,46 @@ const server = createServer(async (req, res) => {
         return;
       }
       // The stream URL points back at us — keeps Subsonic creds server-side.
+      // Internet-radio picks come pre-built; track picks build it from id.
+      const streamUrl =
+        result.url ?? `/radio/stream/${encodeURIComponent(result.entry.id)}`;
       sendJson(req, res, 200, {
         ...result.entry,
-        url: `/radio/stream/${encodeURIComponent(result.entry.id)}`,
+        url: streamUrl,
         playlist: result.playlistName,
         fallback: result.fallback,
       });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname.startsWith("/radio/stream/internet/")) {
+      if (!NAVIDROME_CONFIGURED) {
+        sendJson(req, res, 503, { error: "navidrome not configured" });
+        return;
+      }
+      const stationId = decodeURIComponent(
+        url.pathname.slice("/radio/stream/internet/".length)
+      );
+      if (!stationId) {
+        sendJson(req, res, 400, { error: "missing station id" });
+        return;
+      }
+      let station = findInternetRadioStation(stationId);
+      if (!station) {
+        // Cache may be empty (cold boot, after expiry). Refresh and retry.
+        try {
+          await getInternetRadioStations();
+        } catch (err) {
+          sendJson(req, res, 502, { error: `navidrome unreachable: ${err.message}` });
+          return;
+        }
+        station = findInternetRadioStation(stationId);
+      }
+      if (!station || typeof station.streamUrl !== "string") {
+        sendJson(req, res, 404, { error: "station not found" });
+        return;
+      }
+      proxyStream(station.streamUrl, req, res);
       return;
     }
 
