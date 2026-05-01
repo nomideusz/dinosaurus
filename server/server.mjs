@@ -225,9 +225,30 @@ function activeForClient(client) {
   return [...activeItems.values()].filter((item) => itemMatchesClient(client, item)).map(publicActiveItem);
 }
 
-function isKnown(id) {
+/**
+ * Stable identifier for dedup. The narrator emits items with a `sourceId`
+ * (the upstream-stable id, e.g. "hn:42") and a per-run `id` like
+ * "hn:42:run:abc:5". For dedup against bins we always want the sourceId,
+ * so legacy entries that only carry the run-id form fall back to stripping
+ * the ":run:" suffix.
+ */
+function lookupId(item) {
+  if (typeof item?.sourceId === "string" && item.sourceId.length > 0) {
+    return item.sourceId;
+  }
+  const id = typeof item?.id === "string" ? item.id : "";
+  const idx = id.indexOf(":run:");
+  return idx >= 0 ? id.slice(0, idx) : id;
+}
+
+function isKnown(srcId) {
   for (const item of activeItems.values()) {
-    if ((item.sourceId ?? item.id) === id) return true;
+    if (lookupId(item) === srcId) return true;
+  }
+  for (const list of bins.values()) {
+    for (const item of list) {
+      if (lookupId(item) === srcId) return true;
+    }
   }
   return false;
 }
@@ -244,7 +265,8 @@ function activeItemFromSource(item) {
 
 function addDeliveredItem(item) {
   const list = bins.get(item.kind) ?? [];
-  const filtered = list.filter((d) => d.id !== item.id);
+  const sid = lookupId(item);
+  const filtered = list.filter((d) => lookupId(d) !== sid);
   filtered.unshift(item);
   if (filtered.length > MAX_PER_KIND) filtered.length = MAX_PER_KIND;
   bins.set(item.kind, filtered);
@@ -1243,6 +1265,7 @@ function handleDeliver(client, id) {
   }
   addDeliveredItem({
     id: item.id,
+    sourceId: item.sourceId,
     kind: item.kind,
     text: item.text,
     href: item.href,

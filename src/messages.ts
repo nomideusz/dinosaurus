@@ -39,6 +39,18 @@ export interface DeliveredItem {
   readonly deliveredAt: number;
 }
 
+/**
+ * Stable identifier for dedup. The server emits items with a `sourceId`
+ * (e.g. "hn:42") and a per-run `id` like "hn:42:run:abc:5". For dedup
+ * against bins we always want the sourceId; legacy entries that only
+ * carry the run-id form fall back to stripping the ":run:" suffix.
+ */
+function lookupId(item: { id: string }): string {
+  const id = item.id;
+  const idx = id.indexOf(":run:");
+  return idx >= 0 ? id.slice(0, idx) : id;
+}
+
 export interface CategoryBin extends BinDef {
   el: HTMLDivElement;
   countEl: HTMLSpanElement;
@@ -294,10 +306,16 @@ export class MessageWorld {
     return this.messages.get(id);
   }
 
-  /** True if any bin's archive already contains an item with this id. */
-  isInArchive(id: string): boolean {
+  /**
+   * True if any bin's archive already contains an item with this source id.
+   * Compares on the stable source id (see `lookupId`) rather than the
+   * per-run id, so a re-emitted item is recognised as already-delivered.
+   */
+  isInArchive(srcId: string): boolean {
     for (const bin of this.bins) {
-      for (const d of bin.delivered) if (d.id === id) return true;
+      for (const d of bin.delivered) {
+        if (lookupId(d) === srcId) return true;
+      }
     }
     return false;
   }
@@ -313,7 +331,7 @@ export class MessageWorld {
    */
   spawn(item: ContentItem): FloatingMessage | null {
     if (this.messages.has(item.id)) return this.messages.get(item.id) ?? null;
-    if (this.isInArchive(item.id)) return null;
+    if (this.isInArchive(lookupId(item))) return null;
     if (this.messages.size >= this.maxConcurrent) return null;
     if (!this.binFor(item.kind)) return null;
 
@@ -500,7 +518,8 @@ export class MessageWorld {
       linkLabel: m.linkLabel,
       deliveredAt: Date.now(),
     };
-    bin.delivered = bin.delivered.filter((d) => d.id !== m.id);
+    const sid = lookupId(newItem);
+    bin.delivered = bin.delivered.filter((d) => lookupId(d) !== sid);
     bin.delivered.unshift(newItem);
     pruneExpired(bin);
     bin.count = bin.delivered.length;
@@ -1015,7 +1034,11 @@ export class MessageWorld {
     if (!item) return;
     if (!this.binFor(item.kind)) return;
     if (!this.matchesRadio(item)) return;
-    if (this.messages.has(item.id) || this.pendingItems.has(item.id) || this.isInArchive(item.id)) {
+    if (
+      this.messages.has(item.id) ||
+      this.pendingItems.has(item.id) ||
+      this.isInArchive(lookupId(item))
+    ) {
       return;
     }
     this.pendingItems.set(item.id, item);
@@ -1031,7 +1054,7 @@ export class MessageWorld {
     if (now < this.nextSpawnAt) return;
     if (this.messages.size >= this.maxConcurrent) return;
     for (const [id, item] of this.pendingItems) {
-      if (this.isInArchive(id) || !this.binFor(item.kind)) {
+      if (this.isInArchive(lookupId(item)) || !this.binFor(item.kind)) {
         this.pendingItems.delete(id);
         continue;
       }
@@ -1072,8 +1095,9 @@ export class MessageWorld {
   private applyAddedItem(item: DeliveredItem): void {
     const bin = this.binFor(item.kind);
     if (!bin) return;
-    const wasPresent = bin.delivered.some((d) => d.id === item.id);
-    bin.delivered = bin.delivered.filter((d) => d.id !== item.id);
+    const sid = lookupId(item);
+    const wasPresent = bin.delivered.some((d) => lookupId(d) === sid);
+    bin.delivered = bin.delivered.filter((d) => lookupId(d) !== sid);
     bin.delivered.unshift(item);
     pruneExpired(bin);
     bin.count = bin.delivered.length;
@@ -1118,7 +1142,7 @@ export class MessageWorld {
     // If a refresh reveals that something currently active is already in the
     // shared archive, server/archive state wins and the local task is canceled.
     for (const m of [...this.messages.values()]) {
-      if (this.isInArchive(m.id)) this.cullActiveItem(m.id);
+      if (this.isInArchive(lookupId(m))) this.cullActiveItem(m.id);
     }
   }
 
