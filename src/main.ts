@@ -9,7 +9,7 @@
 import { Dino, type Mood } from "./dino.js";
 import { DinoAmbient } from "./dinoBehavior.js";
 import { DinoBubble } from "./dinoBubble.js";
-import { DinoVoice, mountVoiceToggle } from "./dinoVoice.js";
+import { DinoVoice } from "./dinoVoice.js";
 import { MessageWorld, type FloatingMessage } from "./messages.js";
 import type { ContentKind } from "./services/content.js";
 import { WeatherClient } from "./weather.js";
@@ -63,7 +63,6 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
   const ambient = new DinoAmbient(dino, () => weather.conditions());
   const bubble = new DinoBubble(stage, dino);
   const voice = new DinoVoice(ARCHIVE_API_URL);
-  mountVoiceToggle(stage, voice);
 
   const messages = new MessageWorld(
     stage,
@@ -90,6 +89,7 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
         void voice.say(text);
         dino.react("happy", 800);
       },
+      voice,
     }
   );
 

@@ -3,9 +3,9 @@
 // archive server (ElevenLabs proxy). The audio is played through a Blob
 // URL that's revoked as soon as playback ends — nothing is persisted.
 //
-// Browsers block autoplay until the user has interacted with the page, so
-// the toggle button itself acts as that gesture: clicking it counts as the
-// activation that lets subsequent `audio.play()` calls succeed.
+// Browsers block autoplay until the user has interacted with the page;
+// the radio's voice toggle (rendered in messages.ts) acts as that gesture
+// so subsequent `audio.play()` calls succeed.
 
 const STORAGE_KEY = "dino-voice-enabled";
 
@@ -115,27 +115,4 @@ export class DinoVoice {
       this.currentUrl = null;
     }
   }
-}
-
-export function mountVoiceToggle(
-  parent: HTMLElement,
-  voice: DinoVoice
-): HTMLButtonElement {
-  const btn = document.createElement("button");
-  btn.type = "button";
-  btn.className = "dino-voice-toggle";
-  const render = () => {
-    const on = voice.isEnabled();
-    btn.textContent = on ? "🔊" : "🔇";
-    btn.setAttribute("aria-label", on ? "mute dino" : "unmute dino");
-    btn.setAttribute("aria-pressed", on ? "true" : "false");
-    btn.classList.toggle("dino-voice-toggle--on", on);
-  };
-  btn.addEventListener("click", () => {
-    voice.toggle();
-    render();
-  });
-  render();
-  parent.appendChild(btn);
-  return btn;
 }

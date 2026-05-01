@@ -11,6 +11,7 @@
 // "I'm carrying it here now", and "deliver it to bin K".
 
 import { RADIO_MANIFEST } from "virtual:radio-manifest";
+import { DinoVoice } from "./dinoVoice.js";
 import type { ContentItem, ContentKind } from "./services/content.js";
 
 export type MessageState =
@@ -92,6 +93,12 @@ export interface MessageWorldOptions {
   onBacklogPressure?: (pendingCount: number) => void;
   /** An ephemeral dino thought arrived from the server — render a speech bubble. */
   onDinoThought?: (text: string) => void;
+  /**
+   * Optional voice engine. When provided, the radio panel grows a small
+   * speaker toggle next to the music power button so the visitor can opt
+   * in to dino speaking his thoughts aloud.
+   */
+  voice?: DinoVoice;
 }
 
 /**
@@ -157,6 +164,7 @@ export class MessageWorld {
   private readonly onRadioChange?: (prefs: RadioPreferences) => void;
   private readonly onBacklogPressure?: (pendingCount: number) => void;
   private readonly onDinoThought?: (text: string) => void;
+  private readonly voice?: DinoVoice;
   private archiveWarningShown = false;
   private realtime: WebSocket | null = null;
   private realtimeConnected = false;
@@ -183,6 +191,7 @@ export class MessageWorld {
     this.onRadioChange = opts.onRadioChange;
     this.onBacklogPressure = opts.onBacklogPressure;
     this.onDinoThought = opts.onDinoThought;
+    this.voice = opts.voice;
     this.worldW = worldW;
     this.worldH = worldH;
     this.maxConcurrent = opts.maxConcurrent ?? 3;
@@ -658,18 +667,35 @@ export class MessageWorld {
       )
       .join("");
 
+    const voiceEnabled = this.voice?.isEnabled() ?? false;
+    const voiceButton = this.voice
+      ? `<button type="button" class="radio-voice" aria-pressed="${voiceEnabled}" aria-label="toggle voice" title="voice">
+          <svg class="radio-voice-on" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+            <path d="M1 4 L3 4 L5.5 2 L5.5 8 L3 6 L1 6 Z" fill="currentColor"></path>
+            <path d="M7 3.4 Q8.2 5 7 6.6" stroke="currentColor" stroke-width="0.7" fill="none" stroke-linecap="round"></path>
+          </svg>
+          <svg class="radio-voice-off" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+            <path d="M1 4 L3 4 L5.5 2 L5.5 8 L3 6 L1 6 Z" fill="currentColor"></path>
+            <path d="M7 3 L9 7 M9 3 L7 7" stroke="currentColor" stroke-width="0.7" fill="none" stroke-linecap="round"></path>
+          </svg>
+        </button>`
+      : "";
+
     controls.innerHTML = `
       <div class="radio-brand">
         <span class="radio-name">dinosaurus</span>
-        <button type="button" class="radio-power" aria-pressed="false" aria-label="toggle music" title="music">
-          <svg class="radio-power-pause" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-            <rect x="2" y="1.5" width="2" height="7" fill="currentColor"></rect>
-            <rect x="6" y="1.5" width="2" height="7" fill="currentColor"></rect>
-          </svg>
-          <svg class="radio-power-play" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
-            <path d="M2.5 1.5 L8.5 5 L2.5 8.5 Z" fill="currentColor"></path>
-          </svg>
-        </button>
+        <div class="radio-buttons">
+          ${voiceButton}
+          <button type="button" class="radio-power" aria-pressed="false" aria-label="toggle music" title="music">
+            <svg class="radio-power-pause" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <rect x="2" y="1.5" width="2" height="7" fill="currentColor"></rect>
+              <rect x="6" y="1.5" width="2" height="7" fill="currentColor"></rect>
+            </svg>
+            <svg class="radio-power-play" width="10" height="10" viewBox="0 0 10 10" aria-hidden="true">
+              <path d="M2.5 1.5 L8.5 5 L2.5 8.5 Z" fill="currentColor"></path>
+            </svg>
+          </button>
+        </div>
       </div>
       <div class="radio-top">
         <span class="radio-freq">
@@ -732,6 +758,15 @@ export class MessageWorld {
       controls.dataset.playing = String(enabled);
       this.setRadioStatus(enabled ? "live" : "off");
     });
+
+    const voiceBtn = controls.querySelector<HTMLButtonElement>(".radio-voice");
+    if (voiceBtn && this.voice) {
+      const voice = this.voice;
+      voiceBtn.addEventListener("click", () => {
+        const on = voice.toggle();
+        voiceBtn.setAttribute("aria-pressed", String(on));
+      });
+    }
 
     // Draggable dial — pointer x maps to the nearest channel snap point. The
     // visual needle / freq / active button update live during drag so the
@@ -2146,7 +2181,13 @@ function injectStylesOnce(): void {
       font-size: 13px;
       letter-spacing: 0.04em;
     }
-    .radio-power {
+    .radio-buttons {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .radio-power,
+    .radio-voice {
       width: 18px;
       height: 18px;
       display: flex;
@@ -2159,12 +2200,18 @@ function injectStylesOnce(): void {
       cursor: pointer;
       transition: color 0.15s ease, border-color 0.15s ease;
     }
-    .radio-power:hover { color: #d97758; border-color: #d97758; }
+    .radio-power:hover,
+    .radio-voice:hover { color: #d97758; border-color: #d97758; }
     .radio-controls[data-playing="true"] .radio-power { color: var(--ink, #e8e4d8); }
     .radio-power-pause { display: none; }
     .radio-power-play  { display: block; }
     .radio-controls[data-playing="true"] .radio-power-pause { display: block; }
     .radio-controls[data-playing="true"] .radio-power-play  { display: none; }
+    .radio-voice[aria-pressed="true"]  { color: var(--ink, #e8e4d8); }
+    .radio-voice-on  { display: none; }
+    .radio-voice-off { display: block; }
+    .radio-voice[aria-pressed="true"] .radio-voice-on  { display: block; }
+    .radio-voice[aria-pressed="true"] .radio-voice-off { display: none; }
 
     .radio-top {
       display: flex;
