@@ -1,7 +1,8 @@
-// Optional voice for dino's thoughts. When enabled, each `dino_thought`
-// event triggers a fetch to /tts, which streams MP3 audio back from the
-// archive server (ElevenLabs proxy). The audio is played through a Blob
-// URL that's revoked as soon as playback ends — nothing is persisted.
+// Optional voice for dino's thoughts and ambient sound effects. When
+// enabled, each `dino_thought` event triggers a fetch to /tts and each
+// `dino_sfx` event a fetch to /sfx/<token>; the archive proxies/serves
+// the MP3 back, the browser plays it through a Blob URL that's revoked
+// as soon as playback ends — nothing is persisted.
 //
 // Browsers block autoplay until the user has interacted with the page;
 // the radio's voice toggle (rendered in messages.ts) acts as that gesture
@@ -45,9 +46,33 @@ export class DinoVoice {
   }
 
   async say(text: string): Promise<void> {
-    if (!this.enabled) return;
     const trimmed = text.trim();
     if (!trimmed) return;
+    await this.fetchAndPlay((signal) =>
+      fetch(`${this.archiveUrl}/tts`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: trimmed }),
+        signal,
+      })
+    );
+  }
+
+  /**
+   * Play an ambient sfx clip from a relative archive path (e.g.
+   * "/sfx/<token>") or an absolute URL. Same playback path as `say()` —
+   * gated by the voice toggle and aborted if a fresh thought/sfx arrives.
+   */
+  async playSfx(path: string): Promise<void> {
+    if (!path) return;
+    const url = /^https?:/i.test(path) ? path : `${this.archiveUrl}${path}`;
+    await this.fetchAndPlay((signal) => fetch(url, { signal }));
+  }
+
+  private async fetchAndPlay(
+    fetcher: (signal: AbortSignal) => Promise<Response>
+  ): Promise<void> {
+    if (!this.enabled) return;
 
     this.stopCurrent();
     const ac = new AbortController();
@@ -55,12 +80,7 @@ export class DinoVoice {
 
     let blob: Blob | null = null;
     try {
-      const resp = await fetch(`${this.archiveUrl}/tts`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: trimmed }),
-        signal: ac.signal,
-      });
+      const resp = await fetcher(ac.signal);
       if (!resp.ok) return;
       blob = await resp.blob();
     } catch (err) {
@@ -74,14 +94,14 @@ export class DinoVoice {
 
     if (ac.signal.aborted || !blob) return;
 
-    const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
+    const objectUrl = URL.createObjectURL(blob);
+    const audio = new Audio(objectUrl);
     this.current = audio;
-    this.currentUrl = url;
+    this.currentUrl = objectUrl;
 
     const cleanup = () => {
-      if (this.currentUrl === url) {
-        URL.revokeObjectURL(url);
+      if (this.currentUrl === objectUrl) {
+        URL.revokeObjectURL(objectUrl);
         this.currentUrl = null;
       }
       if (this.current === audio) this.current = null;

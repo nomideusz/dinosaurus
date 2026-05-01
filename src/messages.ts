@@ -935,6 +935,7 @@ export class MessageWorld {
       ids?: unknown;
       reason?: unknown;
       text?: unknown;
+      url?: unknown;
     };
     switch (obj.type) {
       case "hello":
@@ -980,6 +981,11 @@ export class MessageWorld {
       case "dino_thought":
         if (typeof obj.text === "string" && obj.text.length > 0) {
           this.onDinoThought?.(obj.text);
+        }
+        return;
+      case "dino_sfx":
+        if (typeof obj.url === "string" && obj.url.length > 0) {
+          void this.voice?.playSfx(obj.url);
         }
         return;
       default:

@@ -68,10 +68,15 @@ Archive runtime variables:
   speak dino's thoughts aloud. Unset disables the endpoint (returns 503).
   `ELEVENLABS_VOICE_ID` (default `1LHhf1fWEA2SA0ReEViX`) and
   `ELEVENLABS_MODEL_ID` (default `eleven_v3`) override the voice/model.
-  The frontend gates voice playback behind a small speaker toggle in the
-  stage's top-right corner; opt-in is persisted per visitor in
-  `localStorage` and the audio is streamed Blob-only (never written to disk
-  on either side).
+  The frontend gates voice playback behind a small speaker toggle on the
+  radio panel; opt-in is persisted per visitor in `localStorage` and the
+  audio is streamed Blob-only (never written to disk on either side).
+  When both `ELEVENLABS_API_KEY` and `ANTHROPIC_API_KEY` are set, the
+  archive also runs a slow ambient sfx cadence (~6–10 min): Claude Haiku
+  writes a short evocative prompt from a recent narrator item, ElevenLabs
+  sound generation produces ~2.5 s of audio, and a `dino_sfx` event is
+  broadcast pointing at `/sfx/<token>` (kept in memory ~5 min then GC'd).
+  Visitors with the voice toggle on hear it; everyone else ignores it.
 
 Navidrome service runtime variables (the bundled image):
 

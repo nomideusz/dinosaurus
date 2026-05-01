@@ -20,6 +20,7 @@ import { Facts } from "./sources/facts.mjs";
 import { HackerNews } from "./sources/hn.mjs";
 import { createMusings } from "./sources/musings.mjs";
 import { Quakes } from "./sources/quakes.mjs";
+import { createSfxPrompter } from "./sources/sfx.mjs";
 import { Space } from "./sources/space.mjs";
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -480,6 +481,21 @@ const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID ?? "1LHhf1fWEA2SA0Re
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID ?? "eleven_v3";
 const TTS_MAX_TEXT_LENGTH = 500;
 
+// ── SFX (ElevenLabs sound generation) ────────────────────────────────────
+//
+// On a slow cadence the archive picks a recent narrator item, asks Claude
+// Haiku for a short evocative prompt, runs it through ElevenLabs sound
+// generation, and broadcasts a `dino_sfx` event. The audio lives in an
+// in-memory cache keyed by an opaque token; clients fetch it via
+// /sfx/<token> for a few minutes before it's GC'd.
+const SFX_INTERVAL_BASE_MS = 6 * 60_000;
+const SFX_INTERVAL_JITTER_MS = 4 * 60_000;
+const SFX_INITIAL_DELAY_MS = 60_000;
+const SFX_DURATION_SECONDS = 2.5;
+const SFX_PROMPT_INFLUENCE = 0.3;
+const SFX_CACHE_TTL_MS = 5 * 60_000;
+const SFX_REQUEST_TIMEOUT_MS = 30_000;
+
 /**
  * Maps each radio channel to the Navidrome playlist name we should pick
  * from. Singular channel names (quake/fact/bird) target plural
@@ -740,6 +756,69 @@ function proxyTts(text, req, res) {
   req.on("close", () => upstream.destroy());
   upstream.write(JSON.stringify({ text, model_id: ELEVENLABS_MODEL_ID }));
   upstream.end();
+}
+
+/**
+ * In-memory store of generated sfx clips. Keyed by the random token we
+ * embed in the broadcast event's URL. Clients have ~5 minutes to fetch
+ * each clip before it's GC'd.
+ *
+ * @type {Map<string, { buf: Buffer, expiresAt: number }>}
+ */
+const sfxCache = new Map();
+
+function gcSfxCache() {
+  const now = Date.now();
+  for (const [token, entry] of sfxCache) {
+    if (entry.expiresAt <= now) sfxCache.delete(token);
+  }
+}
+
+/**
+ * Call ElevenLabs sound-generation and resolve with the full MP3 buffer.
+ * Used by the slow sfx cadence — we buffer the whole clip (2-3 s, ~30 kB)
+ * because we then serve it to N visitors out of an in-memory cache.
+ */
+function generateSfxAudio(prompt) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      text: prompt,
+      duration_seconds: SFX_DURATION_SECONDS,
+      prompt_influence: SFX_PROMPT_INFLUENCE,
+    });
+    const req = httpsRequest(
+      {
+        protocol: "https:",
+        hostname: "api.elevenlabs.io",
+        port: 443,
+        path: "/v1/sound-generation?output_format=mp3_44100_64",
+        method: "POST",
+        headers: {
+          "xi-api-key": ELEVENLABS_API_KEY,
+          "content-type": "application/json",
+          accept: "audio/mpeg",
+        },
+        timeout: SFX_REQUEST_TIMEOUT_MS,
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => {
+          if (res.statusCode !== 200) {
+            const txt = Buffer.concat(chunks).toString("utf-8").slice(0, 200);
+            reject(new Error(`upstream ${res.statusCode}: ${txt}`));
+            return;
+          }
+          resolve(Buffer.concat(chunks));
+        });
+        res.on("error", reject);
+      }
+    );
+    req.on("error", reject);
+    req.on("timeout", () => req.destroy(new Error("timeout")));
+    req.write(body);
+    req.end();
+  });
 }
 
 /**
@@ -1080,6 +1159,24 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname.startsWith("/sfx/")) {
+      const token = url.pathname.slice("/sfx/".length);
+      const entry = sfxCache.get(token);
+      if (!entry || entry.expiresAt <= Date.now()) {
+        if (entry) sfxCache.delete(token);
+        sendJson(req, res, 404, { error: "sfx not found" });
+        return;
+      }
+      setCors(req, res);
+      res.writeHead(200, {
+        "content-type": "audio/mpeg",
+        "cache-control": "no-store",
+        "content-length": entry.buf.length,
+      });
+      res.end(entry.buf);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/tts") {
       if (!ELEVENLABS_API_KEY) {
         sendJson(req, res, 503, { error: "tts not configured" });
@@ -1360,6 +1457,50 @@ function scheduleNextThought(delay) {
   }, delay).unref?.();
 }
 scheduleNextThought(THOUGHT_INITIAL_DELAY_MS);
+
+// Slow ambient sfx cadence. Picks a recent narrator item, asks Claude
+// for a short evocative prompt, generates 2-3 s of audio via ElevenLabs,
+// and broadcasts a dino_sfx event whose URL points at the in-memory
+// cache. Skipped silently when keys are missing, the recent-item buffer
+// is empty, no clients are connected, or Claude returned "skip".
+const sfxPrompter = createSfxPrompter({ apiKey: process.env.ANTHROPIC_API_KEY });
+async function broadcastDinoSfx() {
+  if (!ELEVENLABS_API_KEY || !process.env.ANTHROPIC_API_KEY) return;
+  if (recentSpokenItems.length === 0) return;
+  if (sseClients.size === 0 && wsClients.size === 0) return;
+  const item = recentSpokenItems[Math.floor(Math.random() * recentSpokenItems.length)];
+  let prompt;
+  try {
+    prompt = await sfxPrompter.generate(item);
+  } catch (err) {
+    console.warn("[sfx] prompt failed:", err?.message ?? err);
+    return;
+  }
+  if (!prompt) return;
+  try {
+    const buf = await generateSfxAudio(prompt);
+    gcSfxCache();
+    const token = randomUUID();
+    sfxCache.set(token, { buf, expiresAt: Date.now() + SFX_CACHE_TTL_MS });
+    const event = {
+      type: "dino_sfx",
+      url: `/sfx/${token}`,
+      kind: item.kind,
+      hint: prompt,
+    };
+    broadcastEvent(event);
+    broadcastRealtime(event);
+  } catch (err) {
+    console.warn("[sfx] generation failed:", err?.message ?? err);
+  }
+}
+function scheduleNextSfx(delay) {
+  setTimeout(() => {
+    void broadcastDinoSfx();
+    scheduleNextSfx(SFX_INTERVAL_BASE_MS + Math.random() * SFX_INTERVAL_JITTER_MS);
+  }, delay).unref?.();
+}
+scheduleNextSfx(SFX_INITIAL_DELAY_MS);
 
 // Auto-sync radio playlists shortly after boot and periodically thereafter
 // so the `all` playlist tracks the live Navidrome library without anyone
