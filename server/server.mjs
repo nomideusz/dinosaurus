@@ -448,6 +448,16 @@ const NAVIDROME_CONFIGURED = !!(NAVIDROME_URL && NAVIDROME_USER && NAVIDROME_PAS
 /** Shared secret for the /admin/* endpoints. Empty disables them entirely. */
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN ?? "";
 
+// ── TTS (ElevenLabs) ─────────────────────────────────────────────────────
+//
+// Optional voice for dino's thoughts. When ELEVENLABS_API_KEY is set, the
+// /tts endpoint proxies a stream of MP3 audio for a given thought back to
+// the client. Key never leaves the server.
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY ?? "";
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID ?? "1LHhf1fWEA2SA0ReEViX";
+const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID ?? "eleven_v3";
+const TTS_MAX_TEXT_LENGTH = 500;
+
 /**
  * Maps each radio channel to the Navidrome playlist name we should pick
  * from. Singular channel names (quake/fact/bird) target plural
@@ -649,6 +659,64 @@ function proxyStream(targetUrl, req, res) {
   // If the client aborts (skips track / closes tab), tear down the upstream
   // request so we're not pulling bytes nobody is listening to.
   req.on("close", () => upstream.destroy());
+  upstream.end();
+}
+
+/**
+ * Proxy a TTS request to ElevenLabs and stream the MP3 back. Keeps the API
+ * key server-side. Aborts the upstream call if the client disconnects mid
+ * stream (e.g. dino moves on to the next thought).
+ */
+function proxyTts(text, req, res) {
+  const path =
+    `/v1/text-to-speech/${encodeURIComponent(ELEVENLABS_VOICE_ID)}` +
+    `?output_format=mp3_44100_64`;
+  const upstream = httpsRequest(
+    {
+      protocol: "https:",
+      hostname: "api.elevenlabs.io",
+      port: 443,
+      path,
+      method: "POST",
+      headers: {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "content-type": "application/json",
+        accept: "audio/mpeg",
+      },
+    },
+    (upRes) => {
+      setCors(req, res);
+      if (upRes.statusCode !== 200) {
+        const chunks = [];
+        upRes.on("data", (c) => chunks.push(c));
+        upRes.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf-8").slice(0, 200);
+          console.warn("[tts] upstream", upRes.statusCode, body);
+          if (!res.headersSent) {
+            sendJson(req, res, 502, {
+              error: "tts upstream failed",
+              status: upRes.statusCode,
+            });
+          } else {
+            res.destroy();
+          }
+        });
+        return;
+      }
+      res.writeHead(200, {
+        "content-type": "audio/mpeg",
+        "cache-control": "no-store",
+      });
+      upRes.pipe(res);
+    }
+  );
+  upstream.on("error", (err) => {
+    console.warn("[tts] proxy error:", err.message);
+    if (!res.headersSent) sendJson(req, res, 502, { error: "tts proxy failed" });
+    else res.destroy();
+  });
+  req.on("close", () => upstream.destroy());
+  upstream.write(JSON.stringify({ text, model_id: ELEVENLABS_MODEL_ID }));
   upstream.end();
 }
 
@@ -987,6 +1055,27 @@ const server = createServer(async (req, res) => {
       // The POSTing client already updated its own state optimistically; we
       // still send back a small ack so it knows the canonical timestamp.
       sendJson(req, res, 200, { ok: true, item });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/tts") {
+      if (!ELEVENLABS_API_KEY) {
+        sendJson(req, res, 503, { error: "tts not configured" });
+        return;
+      }
+      let body;
+      try {
+        body = await readJson(req);
+      } catch {
+        sendJson(req, res, 400, { error: "invalid json" });
+        return;
+      }
+      const raw = typeof body?.text === "string" ? body.text.trim() : "";
+      if (!raw || raw.length > TTS_MAX_TEXT_LENGTH) {
+        sendJson(req, res, 400, { error: "invalid text" });
+        return;
+      }
+      proxyTts(raw, req, res);
       return;
     }
 

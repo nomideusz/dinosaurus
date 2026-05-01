@@ -76,3 +76,34 @@ body {
   z-index: 2;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  0 0 0 0.5 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
 }
+
+/* Speaker toggle: opt-in to dino's voice. Sits in the top-right corner of
+   the stage so it's reachable without overlapping cards or bins. */
+.dino-voice-toggle {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--paper, #1f1e26);
+  color: var(--ink, #e8e4d8);
+  border: 1px solid rgba(232, 228, 216, 0.18);
+  border-radius: 0;
+  font: 16px/1 ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  cursor: pointer;
+  z-index: 10;
+  user-select: none;
+  opacity: 0.55;
+  transition: opacity 200ms ease, border-color 200ms ease;
+}
+.dino-voice-toggle:hover,
+.dino-voice-toggle:focus-visible {
+  opacity: 1;
+  outline: none;
+  border-color: rgba(232, 228, 216, 0.4);
+}
+.dino-voice-toggle--on { opacity: 0.9; }

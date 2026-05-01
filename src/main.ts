@@ -9,10 +9,16 @@
 import { Dino, type Mood } from "./dino.js";
 import { DinoAmbient } from "./dinoBehavior.js";
 import { DinoBubble } from "./dinoBubble.js";
+import { DinoVoice, mountVoiceToggle } from "./dinoVoice.js";
 import { MessageWorld, type FloatingMessage } from "./messages.js";
 import type { ContentKind } from "./services/content.js";
 import { WeatherClient } from "./weather.js";
 import { World } from "./world.js";
+
+const ARCHIVE_API_URL = (
+  import.meta.env.VITE_ARCHIVE_URL ??
+  "https://dinosaurus-archive-production.up.railway.app"
+).replace(/\/$/, "");
 
 function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
   const maybeCtx = canvas.getContext("2d");
@@ -56,6 +62,8 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
   // Reads weather + clock + idle timer; reacts only when the dino isn't busy.
   const ambient = new DinoAmbient(dino, () => weather.conditions());
   const bubble = new DinoBubble(stage, dino);
+  const voice = new DinoVoice(ARCHIVE_API_URL);
+  mountVoiceToggle(stage, voice);
 
   const messages = new MessageWorld(
     stage,
@@ -79,6 +87,7 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
       onBacklogPressure: () => dino.react("sad", 900),
       onDinoThought: (text) => {
         bubble.show(text);
+        void voice.say(text);
         dino.react("happy", 800);
       },
     }

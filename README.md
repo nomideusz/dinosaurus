@@ -64,6 +64,14 @@ Archive runtime variables:
   both the boot sync and the periodic refresh.
 - `ANTHROPIC_API_KEY`: optional; enables the `musings` source (Claude Haiku
   generates dino thoughts ~once an hour). Without it the source is skipped.
+- `ELEVENLABS_API_KEY`: optional; enables the `/tts` proxy so the client can
+  speak dino's thoughts aloud. Unset disables the endpoint (returns 503).
+  `ELEVENLABS_VOICE_ID` (default `1LHhf1fWEA2SA0ReEViX`) and
+  `ELEVENLABS_MODEL_ID` (default `eleven_v3`) override the voice/model.
+  The frontend gates voice playback behind a small speaker toggle in the
+  stage's top-right corner; opt-in is persisted per visitor in
+  `localStorage` and the audio is streamed Blob-only (never written to disk
+  on either side).
 
 Navidrome service runtime variables (the bundled image):
 
