@@ -3,8 +3,8 @@
 // by night, and twinkling stars that fade in at dusk and out at dawn.
 //
 // The dot grid stays as a quiet graph-paper texture in the foreground.
-// Everything is kept within a darkish palette so the light-colored dino
-// remains visible against the sky at every hour of the day.
+// Mid-tone palette: bright enough to read as sky, muted enough that the
+// light-colored dino still pops against the horizon at every hour.
 
 import { THEME } from "./theme.js";
 import type { WeatherConditions } from "./weather.js";
@@ -33,15 +33,15 @@ interface SkyKeyframe {
 // Sky color stops across a 24-hour day. The narrator interpolates between
 // adjacent keyframes so transitions are smooth, not steppy.
 const SKY: SkyKeyframe[] = [
-  { hour:  0,   top: rgb("#0a0a14"), bottom: rgb("#14141a") }, // deep night
-  { hour:  5,   top: rgb("#1c1822"), bottom: rgb("#251f2a") }, // pre-dawn
-  { hour:  6.5, top: rgb("#3a2025"), bottom: rgb("#5a2820") }, // dawn (warm)
-  { hour:  9,   top: rgb("#2a3a4a"), bottom: rgb("#3a4858") }, // morning (cool blue)
-  { hour: 13,   top: rgb("#3a4452"), bottom: rgb("#4a5868") }, // midday
-  { hour: 16,   top: rgb("#4a3a35"), bottom: rgb("#5a3530") }, // afternoon (warm)
-  { hour: 18,   top: rgb("#3a2030"), bottom: rgb("#5a1f1a") }, // dusk
-  { hour: 20,   top: rgb("#1c1428"), bottom: rgb("#251828") }, // evening (indigo)
-  { hour: 22,   top: rgb("#0e0e16"), bottom: rgb("#14141c") }, // night
+  { hour:  0,   top: rgb("#161628"), bottom: rgb("#202036") }, // deep night
+  { hour:  5,   top: rgb("#3a2c48"), bottom: rgb("#5e3c54") }, // pre-dawn
+  { hour:  6.5, top: rgb("#5a4670"), bottom: rgb("#c88572") }, // dawn (mauve top → peach horizon)
+  { hour:  9,   top: rgb("#5e7a9a"), bottom: rgb("#9eb6cb") }, // morning (cool blue)
+  { hour: 13,   top: rgb("#6a90b8"), bottom: rgb("#a8c2d8") }, // midday
+  { hour: 16,   top: rgb("#7a5860"), bottom: rgb("#c8806a") }, // afternoon (warm)
+  { hour: 18,   top: rgb("#4a2e60"), bottom: rgb("#c66a52") }, // dusk
+  { hour: 20,   top: rgb("#2a1f3e"), bottom: rgb("#44284e") }, // evening (indigo)
+  { hour: 22,   top: rgb("#1a1a2c"), bottom: rgb("#22222e") }, // night
 ];
 
 // Sun visible in this window (decimal hours). Outside it, the moon is up.
@@ -897,11 +897,11 @@ export class World {
     if (this.hillsFar.length === 0) return;
     const { width, height } = this.state;
     const [, bottomRGB] = this.skyAt(h);
-    // Pull each hill layer toward the page background — more so for the near
-    // layer, so they read as receding silhouettes against the sky bottom.
-    const bg: RGB = [0x14, 0x14, 0x1a];
-    const farRGB = lerpRGB(bottomRGB, bg, 0.55);
-    const nearRGB = lerpRGB(bottomRGB, bg, 0.78);
+    // Pull each hill layer toward a dark indigo — keeps silhouettes reading
+    // as cool purple even when the horizon is warm peach at sunrise/sunset.
+    const bg: RGB = [0x1e, 0x16, 0x2d];
+    const farRGB = lerpRGB(bottomRGB, bg, 0.62);
+    const nearRGB = lerpRGB(bottomRGB, bg, 0.84);
 
     ctx.fillStyle = rgbToCss(farRGB);
     fillHillPath(ctx, this.hillsFar, width, height);
