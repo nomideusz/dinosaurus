@@ -95,15 +95,53 @@ function startApp(stage: HTMLElement, canvas: HTMLCanvasElement): void {
 
   const courier = new Courier(dino, messages);
 
+  // Half-Polish dino, voiced. Most pokes get a quiet flinch; sometimes he
+  // grumbles a line out loud. Cooldown prevents one rapid-fire click from
+  // stacking up six bubbles.
+  const OUCH_LINES = [
+    "ała",
+    "auć",
+    "to boli",
+    "it hurts",
+    "ouch",
+    "ow",
+    "ej!",
+    "no co ty",
+    "delikatniej proszę",
+    "ej, łapy precz",
+    "be gentle",
+    "*sniff* that hurt",
+  ];
+  const OUCH_COOLDOWN_MS = 3500;
+  const OUCH_VOICE_CHANCE = 0.55;
+  let lastOuchAt = -Infinity;
+
   stage.addEventListener("pointerdown", (ev) => {
     if (ev.button !== 0) return;
     const target = ev.target;
     if (target instanceof Element && target.closest("button, a, select, .msg, .archive-backdrop")) {
       return;
     }
-    if (!dino.isAvailable || courier.isBusy) return;
     const rect = stage.getBoundingClientRect();
-    dino.goTo(ev.clientX - rect.left, ev.clientY - rect.top - dino.heightPx);
+    const px = ev.clientX - rect.left;
+    const py = ev.clientY - rect.top;
+
+    if (dino.contains(px, py)) {
+      const now = performance.now();
+      if (now - lastOuchAt > OUCH_COOLDOWN_MS && Math.random() < OUCH_VOICE_CHANCE) {
+        lastOuchAt = now;
+        const line = OUCH_LINES[Math.floor(Math.random() * OUCH_LINES.length)];
+        bubble.show(line);
+        void voice.say(line);
+      }
+      // Always a small flinch, even when he stays quiet — react() is
+      // goal-aware so this won't disturb a delivery.
+      dino.react("sad", 600);
+      return;
+    }
+
+    if (!dino.isAvailable || courier.isBusy) return;
+    dino.goTo(px, py - dino.heightPx);
   });
 
   let resizeRaf = 0;

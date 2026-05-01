@@ -172,6 +172,17 @@ export class Dino {
     }
   }
 
+  /** Hit-test in stage CSS pixels. Loose — a forgiving bounding box. */
+  contains(px: number, py: number): boolean {
+    const halfW = this.widthPx / 2;
+    return (
+      px >= this.x - halfW &&
+      px <= this.x + halfW &&
+      py >= this.y &&
+      py <= this.y + this.heightPx
+    );
+  }
+
   /**
    * User-directed walk. Unlike seek/carry this is not a delivery goal, so the
    * courier may interrupt it when a floating card needs attention.
