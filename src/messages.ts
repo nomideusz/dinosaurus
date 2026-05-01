@@ -787,6 +787,37 @@ export class MessageWorld {
       });
     }
 
+    // Auto-pause for live streams (news = internet radio): if the tab has
+    // been hidden continuously for HIDDEN_GRACE_MS, drop the upstream and
+    // flip the power button off so the listener has to opt back in. Track
+    // playback isn't capped — it self-ends per song. Tab-close already
+    // tears the connection down via req.on("close") on the proxy, so this
+    // only handles the "left it running in a background tab" case.
+    const HIDDEN_GRACE_MS = 5 * 60_000;
+    let hiddenTimer: number | null = null;
+    const cancelHiddenTimer = () => {
+      if (hiddenTimer !== null) {
+        window.clearTimeout(hiddenTimer);
+        hiddenTimer = null;
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        cancelHiddenTimer();
+        hiddenTimer = window.setTimeout(() => {
+          hiddenTimer = null;
+          if (this.radioAudio.pauseLive()) {
+            power.setAttribute("aria-pressed", "false");
+            controls.dataset.playing = "false";
+            this.setRadioStatus("off");
+          }
+        }, HIDDEN_GRACE_MS);
+      } else {
+        cancelHiddenTimer();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
     // Draggable dial — pointer x maps to the nearest channel snap point. The
     // visual needle / freq / active button update live during drag so the
     // user sees what they'd land on, but we only commit (and re-tune the
@@ -1739,6 +1770,36 @@ class RadioAudio {
     await this.ensureStarted(channel);
     this.startMusic(channel);
     return this.musicEnabled;
+  }
+
+  /** True when the currently-playing source is a live internet-radio stream
+   *  (continuous, never `ended`) rather than a finite Subsonic track. */
+  isLiveStream(): boolean {
+    return (
+      typeof this.currentTrackId === "string" &&
+      this.currentTrackId.startsWith("internet:")
+    );
+  }
+
+  /** Stop the radio iff it's currently on a live stream. Returns true if
+   *  it actually paused something — callers use that to flip their UI to
+   *  the off state. Track playback is left alone (it has natural endings). */
+  pauseLive(): boolean {
+    if (!this.musicEnabled || !this.isLiveStream()) return false;
+    // Most reliable cross-browser way to actually drop the network stream
+    // rather than just pause buffering: clear src + load before tearing
+    // down the rest of the music state.
+    if (this.track) {
+      try {
+        this.track.pause();
+        this.track.removeAttribute("src");
+        this.track.load();
+      } catch {
+        // ignore — stopMusic will still tidy up the rest of the state
+      }
+    }
+    this.stopMusic();
+    return true;
   }
 
   tune(channel: RadioChannel): void {
