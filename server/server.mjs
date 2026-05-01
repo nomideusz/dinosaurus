@@ -22,6 +22,7 @@ import { createMusings } from "./sources/musings.mjs";
 import { Quakes } from "./sources/quakes.mjs";
 import { createSfxPrompter } from "./sources/sfx.mjs";
 import { Space } from "./sources/space.mjs";
+import { decodeEntities } from "./sources/util.mjs";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const ARCHIVE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -160,6 +161,16 @@ function loadArchiveFromDisk() {
           typeof it.deliveredAt === "number" &&
           it.deliveredAt >= cutoff
       )
+      .map((it) => ({
+        ...it,
+        // Older snapshots may carry source-encoded entities (e.g. HN's
+        // "Adobe&#39;s") — decode once at load so every render path is
+        // dealing with canonical UTF-8.
+        text: decodeEntities(it.text),
+        ...(typeof it.linkLabel === "string"
+          ? { linkLabel: decodeEntities(it.linkLabel) }
+          : {}),
+      }))
       .slice(0, MAX_PER_KIND);
     if (fresh.length > 0) {
       bins.set(kind, fresh);
